@@ -99,6 +99,9 @@ external tools. */
 #define gnuc64
 #endif
 
+#if defined(__aarch64__)
+#include <arm_acle.h>
+#else
 #if defined(gnuc64) || defined(_WIN32)
 /*
   GCC 4.8 can't include intrinsic headers without -msse4.2.
@@ -121,6 +124,7 @@ ALWAYS_INLINE uint64_t _mm_crc32_u64(uint64_t __C, uint64_t __V) {
 }
 #endif
 #endif  // defined(gnuc64) || defined(_WIN32)
+#endif  // defined(__aarch64__)
 
 #include "univ.i"
 #include "ut0crc32.h"
@@ -155,7 +159,7 @@ bool ut_crc32_cpu_enabled = false;
 #if defined(_WIN32)
 #include <intrin.h>
 #endif
-#if defined(gnuc64) || defined(_WIN32)
+#if defined(gnuc64) || defined(_WIN32) || defined(__aarch64__)
 /** Checks whether the CPU has the CRC32 instructions (part of the SSE4.2
 instruction set).
 @return true if CRC32 is available */
@@ -180,6 +184,9 @@ static bool ut_crc32_check_cpu() {
   return false;
 #else
 
+#if defined(__aarch64__)
+  return true;
+#else
   uint32_t features_ecx;
 
 #if defined(gnuc64)
@@ -201,6 +208,7 @@ static bool ut_crc32_check_cpu() {
 #endif
 
   return features_ecx & (1 << 20);  // SSE4.2
+#endif /* __aarch64__ */
 #endif /* UNIV_DEBUG_VALGRIND */
 }
 
@@ -210,9 +218,17 @@ when the function ends it will contain the new checksum
 @param[in,out]	data	data to be checksummed, the pointer will be advanced
 with 1 byte
 @param[in,out]	len	remaining bytes, it will be decremented with 1 */
+#if defined(__aarch64__)
+MY_ATTRIBUTE((target("arch=armv8-a+crc")))
+#else
 MY_ATTRIBUTE((target("sse4.2")))
+#endif
 inline void ut_crc32_8_hw(uint64_t *crc, const byte **data, ulint *len) {
+#if defined(__aarch64__)
+  *crc = __crc32cb(static_cast<unsigned>(*crc), (*data)[0]);
+#else
   *crc = _mm_crc32_u8(static_cast<unsigned>(*crc), (*data)[0]);
+#endif
   (*data)++;
   (*len)--;
 }
@@ -221,10 +237,18 @@ inline void ut_crc32_8_hw(uint64_t *crc, const byte **data, ulint *len) {
 @param[in]	crc	crc32 checksum so far
 @param[in]	data	data to be checksummed
 @return resulting checksum of crc + crc(data) */
+#if defined(__aarch64__)
+MY_ATTRIBUTE((target("arch=armv8-a+crc")))
+#else
 MY_ATTRIBUTE((target("sse4.2")))
+#endif
 inline uint64_t ut_crc32_64_low_hw(uint64_t crc, uint64_t data) {
   uint64_t crc_64bit = crc;
+#if defined(__aarch64__)
+  crc_64bit = __crc32cd(crc_64bit, data);
+#else
   crc_64bit = _mm_crc32_u64(crc_64bit, data);
+#endif
   return (crc_64bit);
 }
 
@@ -234,7 +258,11 @@ when the function ends it will contain the new checksum
 @param[in,out]	data	data to be checksummed, the pointer will be advanced
 with 8 bytes
 @param[in,out]	len	remaining bytes, it will be decremented with 8 */
+#if defined(__aarch64__)
+MY_ATTRIBUTE((target("arch=armv8-a+crc")))
+#else
 MY_ATTRIBUTE((target("sse4.2")))
+#endif
 inline void ut_crc32_64_hw(uint64_t *crc, const byte **data, ulint *len) {
   uint64_t data_int = *reinterpret_cast<const uint64_t *>(*data);
 
@@ -284,7 +312,11 @@ inline void ut_crc32_64_legacy_big_endian_hw(uint64_t *crc, const byte **data,
 @param[in]	buf	data over which to calculate CRC32
 @param[in]	len	data length
 @return CRC-32C (polynomial 0x11EDC6F41) */
+#if defined(__aarch64__)
+MY_ATTRIBUTE((target("arch=armv8-a+crc")))
+#else
 MY_ATTRIBUTE((target("sse4.2")))
+#endif
 static uint32_t ut_crc32_hw(const byte *buf, ulint len) {
   uint64_t crc = 0xFFFFFFFFU;
 
@@ -660,7 +692,7 @@ static uint32_t ut_crc32_byte_by_byte_sw(const byte *buf, ulint len) {
 /** Initializes the data structures used by ut_crc32*(). Does not do any
  allocations, would not hurt if called twice, but would be pointless. */
 void ut_crc32_init() {
-#if defined(gnuc64) || defined(_WIN32)
+#if defined(gnuc64) || defined(_WIN32) || defined(__aarch64__)
   ut_crc32_cpu_enabled = ut_crc32_check_cpu();
 
   if (ut_crc32_cpu_enabled) {
