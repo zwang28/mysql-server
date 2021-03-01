@@ -1,0 +1,1773 @@
+From 4c41cfc42eb7d29b65f9ef0968718e1c7dfd9adb Mon Sep 17 00:00:00 2001
+From: zwang28 <84491488@qq.com>
+Date: Thu, 4 Feb 2021 14:16:49 +0800
+Subject: [PATCH] sched_affinity_manager
+
+---
+ .../include/query_sched_affinity_sys_var.inc  |   8 +
+ mysql-test/include/sched_affinity_manager.inc |  63 ++
+ mysql-test/r/sched_affinity_manager.result    | 729 ++++++++++++++++++
+ mysql-test/t/sched_affinity_manager.test      |   3 +
+ share/messages_to_error_log.txt               |  27 +
+ sql/CMakeLists.txt                            |   1 +
+ .../connection_handler_per_thread.cc          |  18 +
+ sql/mysqld.cc                                 |  39 +-
+ sql/mysqld.h                                  |   1 +
+ sql/sched_affinity_manager.cc                 | 305 ++++++++
+ sql/sched_affinity_manager.h                  | 117 +++
+ sql/sys_vars.cc                               |  59 ++
+ storage/innobase/log/log0chkp.cc              |   8 +
+ storage/innobase/log/log0write.cc             |  36 +
+ storage/innobase/srv/srv0srv.cc               |   8 +
+ unittest/gunit/CMakeLists.txt                 |   1 +
+ unittest/gunit/sched_affinity_manager-t.cc    |  42 +
+ 17 files changed, 1464 insertions(+), 1 deletion(-)
+ create mode 100644 mysql-test/include/query_sched_affinity_sys_var.inc
+ create mode 100644 mysql-test/include/sched_affinity_manager.inc
+ create mode 100644 mysql-test/r/sched_affinity_manager.result
+ create mode 100644 mysql-test/t/sched_affinity_manager.test
+ create mode 100644 sql/sched_affinity_manager.cc
+ create mode 100644 sql/sched_affinity_manager.h
+ create mode 100644 unittest/gunit/sched_affinity_manager-t.cc
+
+diff --git a/mysql-test/include/query_sched_affinity_sys_var.inc b/mysql-test/include/query_sched_affinity_sys_var.inc
+new file mode 100644
+index 00000000000..e002affd88a
+--- /dev/null
++++ b/mysql-test/include/query_sched_affinity_sys_var.inc
+@@ -0,0 +1,8 @@
++SHOW VARIABLES LIKE 'sched_affinity_foreground_thread';
++SHOW VARIABLES LIKE 'sched_affinity_log_writer';
++SHOW VARIABLES LIKE 'sched_affinity_log_flusher';
++SHOW VARIABLES LIKE 'sched_affinity_log_write_notifier';
++SHOW VARIABLES LIKE 'sched_affinity_log_flush_notifier';
++SHOW VARIABLES LIKE 'sched_affinity_log_closer';
++SHOW VARIABLES LIKE 'sched_affinity_log_checkpointer';
++SHOW VARIABLES LIKE 'sched_affinity_purge_coordinator';
+\ No newline at end of file
+diff --git a/mysql-test/include/sched_affinity_manager.inc b/mysql-test/include/sched_affinity_manager.inc
+new file mode 100644
+index 00000000000..88b49c5171a
+--- /dev/null
++++ b/mysql-test/include/sched_affinity_manager.inc
+@@ -0,0 +1,63 @@
++if (!$target_sched_affinity_group_number) {
++  --skip should specify target_sched_affinity_group_number
++}
++
++if (!$target_sched_affinity_group_capacity) {
++  --skip should specify target_sched_affinity_group_capacity
++}
++
++--let $sched_affinity_group_number = `SELECT variable_value FROM performance_schema.global_status WHERE variable_name='Sched_affinity_group_number'`
++if ($sched_affinity_group_number < $target_sched_affinity_group_number) {
++  --skip $sched_affinity_group_number less than target_sched_affinity_group_number $target_sched_affinity_group_number
++}
++
++--let $sched_affinity_group_capacity = `SELECT variable_value FROM performance_schema.global_status WHERE variable_name='Sched_affinity_group_capacity'`
++if ($sched_affinity_group_capacity < $target_sched_affinity_group_capacity) {
++  --skip $sched_affinity_group_capacity less than target_sched_affinity_group_capacity $target_sched_affinity_group_capacity
++}
++
++--echo # default config
++--source include/query_sched_affinity_sys_var.inc
++
++--echo # set foreground sys_var
++--let $restart_parameters="restart: --sched_affinity_foreground_thread=0-3,5,6"
++--source include/restart_mysqld.inc
++--source include/query_sched_affinity_sys_var.inc
++
++--echo # set log_writer sys_var
++--let $restart_parameters="restart: --sched_affinity_log_writer=4"
++--source include/restart_mysqld.inc
++--source include/query_sched_affinity_sys_var.inc
++
++--echo # set foreground sys_var and log_writer sys_var
++--let $restart_parameters="restart: --sched_affinity_foreground_thread=0-3,5,6 --sched_affinity_log_writer=4"
++--source include/restart_mysqld.inc
++--source include/query_sched_affinity_sys_var.inc
++
++--echo # test foreground thread group
++--let $group1=0,1,2
++--let $range=1
++--let $group2_from=$sched_affinity_group_capacity
++--expr $group2_to=$sched_affinity_group_capacity + $range
++--let $restart_parameters="restart: --sched_affinity_foreground_thread=$group1,$group2_from-$group2_to"
++--source include/restart_mysqld.inc
++--source include/query_sched_affinity_sys_var.inc
++
++--let $i=0
++--let $connection_number = 100
++while ($i<$connection_number)
++{
++  --connect(conn$i,localhost,root,,)
++  --connection default
++  SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++  --inc $i
++}
++
++--let $i=0
++while ($i<$connection_number)
++{
++  --disconnect conn$i
++  --connection default
++  SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++  --inc $i
++}
+diff --git a/mysql-test/r/sched_affinity_manager.result b/mysql-test/r/sched_affinity_manager.result
+new file mode 100644
+index 00000000000..b3beb25c215
+--- /dev/null
++++ b/mysql-test/r/sched_affinity_manager.result
+@@ -0,0 +1,729 @@
++# default config
++SHOW VARIABLES LIKE 'sched_affinity_foreground_thread';
++Variable_name	Value
++sched_affinity_foreground_thread	
++SHOW VARIABLES LIKE 'sched_affinity_log_writer';
++Variable_name	Value
++sched_affinity_log_writer	
++SHOW VARIABLES LIKE 'sched_affinity_log_flusher';
++Variable_name	Value
++sched_affinity_log_flusher	
++SHOW VARIABLES LIKE 'sched_affinity_log_write_notifier';
++Variable_name	Value
++sched_affinity_log_write_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_flush_notifier';
++Variable_name	Value
++sched_affinity_log_flush_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_closer';
++Variable_name	Value
++sched_affinity_log_closer	
++SHOW VARIABLES LIKE 'sched_affinity_log_checkpointer';
++Variable_name	Value
++sched_affinity_log_checkpointer	
++SHOW VARIABLES LIKE 'sched_affinity_purge_coordinator';
++Variable_name	Value
++sched_affinity_purge_coordinator	
++# set foreground sys_var
++# restart: --sched_affinity_foreground_thread=0-3,5,6
++SHOW VARIABLES LIKE 'sched_affinity_foreground_thread';
++Variable_name	Value
++sched_affinity_foreground_thread	0-3,5,6
++SHOW VARIABLES LIKE 'sched_affinity_log_writer';
++Variable_name	Value
++sched_affinity_log_writer	
++SHOW VARIABLES LIKE 'sched_affinity_log_flusher';
++Variable_name	Value
++sched_affinity_log_flusher	
++SHOW VARIABLES LIKE 'sched_affinity_log_write_notifier';
++Variable_name	Value
++sched_affinity_log_write_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_flush_notifier';
++Variable_name	Value
++sched_affinity_log_flush_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_closer';
++Variable_name	Value
++sched_affinity_log_closer	
++SHOW VARIABLES LIKE 'sched_affinity_log_checkpointer';
++Variable_name	Value
++sched_affinity_log_checkpointer	
++SHOW VARIABLES LIKE 'sched_affinity_purge_coordinator';
++Variable_name	Value
++sched_affinity_purge_coordinator	
++# set log_writer sys_var
++# restart: --sched_affinity_log_writer=4
++SHOW VARIABLES LIKE 'sched_affinity_foreground_thread';
++Variable_name	Value
++sched_affinity_foreground_thread	
++SHOW VARIABLES LIKE 'sched_affinity_log_writer';
++Variable_name	Value
++sched_affinity_log_writer	4
++SHOW VARIABLES LIKE 'sched_affinity_log_flusher';
++Variable_name	Value
++sched_affinity_log_flusher	
++SHOW VARIABLES LIKE 'sched_affinity_log_write_notifier';
++Variable_name	Value
++sched_affinity_log_write_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_flush_notifier';
++Variable_name	Value
++sched_affinity_log_flush_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_closer';
++Variable_name	Value
++sched_affinity_log_closer	
++SHOW VARIABLES LIKE 'sched_affinity_log_checkpointer';
++Variable_name	Value
++sched_affinity_log_checkpointer	
++SHOW VARIABLES LIKE 'sched_affinity_purge_coordinator';
++Variable_name	Value
++sched_affinity_purge_coordinator	
++# set foreground sys_var and log_writer sys_var
++# restart: --sched_affinity_foreground_thread=0-3,5,6 --sched_affinity_log_writer=4
++SHOW VARIABLES LIKE 'sched_affinity_foreground_thread';
++Variable_name	Value
++sched_affinity_foreground_thread	0-3,5,6
++SHOW VARIABLES LIKE 'sched_affinity_log_writer';
++Variable_name	Value
++sched_affinity_log_writer	4
++SHOW VARIABLES LIKE 'sched_affinity_log_flusher';
++Variable_name	Value
++sched_affinity_log_flusher	
++SHOW VARIABLES LIKE 'sched_affinity_log_write_notifier';
++Variable_name	Value
++sched_affinity_log_write_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_flush_notifier';
++Variable_name	Value
++sched_affinity_log_flush_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_closer';
++Variable_name	Value
++sched_affinity_log_closer	
++SHOW VARIABLES LIKE 'sched_affinity_log_checkpointer';
++Variable_name	Value
++sched_affinity_log_checkpointer	
++SHOW VARIABLES LIKE 'sched_affinity_purge_coordinator';
++Variable_name	Value
++sched_affinity_purge_coordinator	
++# test foreground thread group
++# restart: --sched_affinity_foreground_thread=0,1,2,24-25
++SHOW VARIABLES LIKE 'sched_affinity_foreground_thread';
++Variable_name	Value
++sched_affinity_foreground_thread	0,1,2,24-25
++SHOW VARIABLES LIKE 'sched_affinity_log_writer';
++Variable_name	Value
++sched_affinity_log_writer	
++SHOW VARIABLES LIKE 'sched_affinity_log_flusher';
++Variable_name	Value
++sched_affinity_log_flusher	
++SHOW VARIABLES LIKE 'sched_affinity_log_write_notifier';
++Variable_name	Value
++sched_affinity_log_write_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_flush_notifier';
++Variable_name	Value
++sched_affinity_log_flush_notifier	
++SHOW VARIABLES LIKE 'sched_affinity_log_closer';
++Variable_name	Value
++sched_affinity_log_closer	
++SHOW VARIABLES LIKE 'sched_affinity_log_checkpointer';
++Variable_name	Value
++sched_affinity_log_checkpointer	
++SHOW VARIABLES LIKE 'sched_affinity_purge_coordinator';
++Variable_name	Value
++sched_affinity_purge_coordinator	
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++1/3; 1/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++2/3; 1/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++2/3; 2/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++3/3; 2/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++4/3; 2/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++4/3; 3/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++5/3; 3/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++5/3; 4/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++6/3; 4/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++7/3; 4/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++7/3; 5/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++8/3; 5/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++8/3; 6/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++9/3; 6/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++10/3; 6/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++10/3; 7/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++11/3; 7/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++11/3; 8/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++12/3; 8/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++13/3; 8/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++13/3; 9/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++14/3; 9/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++14/3; 10/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++15/3; 10/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++16/3; 10/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++16/3; 11/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++17/3; 11/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++17/3; 12/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++18/3; 12/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++19/3; 12/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++19/3; 13/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++20/3; 13/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++20/3; 14/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++21/3; 14/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++22/3; 14/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++22/3; 15/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++23/3; 15/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++23/3; 16/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++24/3; 16/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++25/3; 16/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++25/3; 17/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++26/3; 17/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++26/3; 18/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++27/3; 18/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++28/3; 18/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++28/3; 19/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++29/3; 19/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++29/3; 20/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++30/3; 20/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++31/3; 20/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++31/3; 21/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++32/3; 21/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++32/3; 22/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++33/3; 22/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++34/3; 22/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++34/3; 23/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++35/3; 23/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++35/3; 24/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++36/3; 24/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++37/3; 24/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++37/3; 25/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++38/3; 25/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++38/3; 26/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++39/3; 26/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++40/3; 26/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++40/3; 27/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++41/3; 27/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++41/3; 28/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++42/3; 28/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++43/3; 28/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++43/3; 29/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++44/3; 29/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++44/3; 30/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++45/3; 30/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++46/3; 30/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++46/3; 31/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++47/3; 31/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++47/3; 32/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++48/3; 32/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++49/3; 32/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++49/3; 33/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++50/3; 33/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++50/3; 34/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++51/3; 34/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++52/3; 34/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++52/3; 35/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++53/3; 35/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++53/3; 36/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++54/3; 36/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++55/3; 36/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++55/3; 37/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++56/3; 37/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++56/3; 38/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++57/3; 38/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++58/3; 38/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++58/3; 39/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++59/3; 39/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++59/3; 40/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++60/3; 40/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++61/3; 40/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++61/3; 39/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++60/3; 39/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++60/3; 38/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++59/3; 38/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++58/3; 38/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++58/3; 37/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++57/3; 37/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++57/3; 36/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++56/3; 36/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++55/3; 36/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++55/3; 35/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++54/3; 35/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++54/3; 34/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++53/3; 34/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++52/3; 34/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++52/3; 33/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++51/3; 33/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++51/3; 32/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++50/3; 32/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++49/3; 32/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++49/3; 31/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++48/3; 31/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++48/3; 30/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++47/3; 30/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++46/3; 30/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++46/3; 29/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++45/3; 29/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++45/3; 28/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++44/3; 28/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++43/3; 28/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++43/3; 27/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++42/3; 27/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++42/3; 26/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++41/3; 26/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++40/3; 26/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++40/3; 25/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++39/3; 25/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++39/3; 24/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++38/3; 24/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++37/3; 24/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++37/3; 23/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++36/3; 23/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++36/3; 22/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++35/3; 22/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++34/3; 22/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++34/3; 21/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++33/3; 21/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++33/3; 20/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++32/3; 20/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++31/3; 20/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++31/3; 19/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++30/3; 19/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++30/3; 18/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++29/3; 18/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++28/3; 18/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++28/3; 17/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++27/3; 17/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++27/3; 16/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++26/3; 16/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++25/3; 16/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++25/3; 15/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++24/3; 15/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++24/3; 14/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++23/3; 14/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++22/3; 14/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++22/3; 13/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++21/3; 13/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++21/3; 12/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++20/3; 12/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++19/3; 12/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++19/3; 11/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++18/3; 11/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++18/3; 10/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++17/3; 10/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++16/3; 10/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++16/3; 9/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++15/3; 9/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++15/3; 8/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++14/3; 8/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++13/3; 8/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++13/3; 7/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++12/3; 7/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++12/3; 6/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++11/3; 6/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++10/3; 6/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++10/3; 5/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++9/3; 5/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++9/3; 4/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++8/3; 4/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++7/3; 4/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++7/3; 3/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++6/3; 3/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++6/3; 2/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++5/3; 2/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++4/3; 2/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++4/3; 1/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++3/3; 1/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++3/3; 0/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++2/3; 0/2
++SELECT SUBSTRING_INDEX(variable_value,';',2) from performance_schema.global_status WHERE variable_name='Sched_affinity_status';
++SUBSTRING_INDEX(variable_value,';',2)
++1/3; 0/2
+diff --git a/mysql-test/t/sched_affinity_manager.test b/mysql-test/t/sched_affinity_manager.test
+new file mode 100644
+index 00000000000..8bc82320653
+--- /dev/null
++++ b/mysql-test/t/sched_affinity_manager.test
+@@ -0,0 +1,3 @@
++--let $target_sched_affinity_group_number=2
++--let $target_sched_affinity_group_capacity=8
++--source include/sched_affinity_manager.inc
+diff --git a/share/messages_to_error_log.txt b/share/messages_to_error_log.txt
+index 82a27b57c17..31d1a34301d 100644
+--- a/share/messages_to_error_log.txt
++++ b/share/messages_to_error_log.txt
+@@ -2798,6 +2798,33 @@ ER_RPL_GTID_MODE_REQUIRES_ENFORCE_GTID_CONSISTENCY_ON
+ ER_WARN_NO_SERVERID_SPECIFIED
+   eng "You have not provided a mandatory server-id. Servers in a replication topology must have unique server-ids. Please refer to the proper server start-up parameters documentation."
+ 
++ER_CANT_PARSE_CPU_STRING
++  eng "Cannot parse cpu string '%s'."
++
++ER_LIBNUMA_TEST_FAIL
++  eng "libnuma test fail."
++
++ER_NUMA_AVAILABLE_TEST_FAIL
++  eng "numa_available test fail."
++
++ER_CANNOT_SET_THREAD_SCHED_AFFINIFY
++  eng "Cannot set thread %s sched affinity."
++
++ER_CANNOT_UNSET_THREAD_SCHED_AFFINIFY
++  eng "Cannot unset thread %s sched affinity."
++
++ER_USE_DUMMY_SCHED_AFFINITY_MANAGER
++  eng "use dummy sched_affinity_manager."
++
++ER_SCHED_AFFINITY_THREAD_PROCESS_CONFLICT
++  eng "Found sched affinity conflict between threads and process."
++
++ER_SCHED_AFFINITY_FOREGROUND_BACKGROUND_CONFLICT
++  eng "Found sched affinity conflict between foreground threads and background threads."
++
++ER_CANNOT_CREATE_SCHED_AFFINITY_MANAGER
++  eng "Cannot create sched affinity manager."
++
+ ER_ABORTING_USER_CONNECTION
+   eng "Aborted connection %u to db: '%-.192s' user: '%-.48s' host: '%-.255s' (%-.64s)."
+ 
+diff --git a/sql/CMakeLists.txt b/sql/CMakeLists.txt
+index 1671fb88c94..fc8ef7e81ee 100644
+--- a/sql/CMakeLists.txt
++++ b/sql/CMakeLists.txt
+@@ -451,6 +451,7 @@ SET(SQL_SHARED_SOURCES
+   rpl_write_set_handler.cc
+   rules_table_service.cc
+   rwlock_scoped_lock.cc
++  sched_affinity_manager.cc
+   sd_notify.cc
+   sdi_utils.cc
+   session_tracker.cc
+diff --git a/sql/conn_handler/connection_handler_per_thread.cc b/sql/conn_handler/connection_handler_per_thread.cc
+index ceec77bbb86..066436a770f 100644
+--- a/sql/conn_handler/connection_handler_per_thread.cc
++++ b/sql/conn_handler/connection_handler_per_thread.cc
+@@ -60,6 +60,7 @@
+ #include "sql/sql_error.h"
+ #include "sql/sql_parse.h"             // do_command
+ #include "sql/sql_thd_internal_api.h"  // thd_set_thread_stack
++#include "sql/sched_affinity_manager.h"
+ #include "thr_mutex.h"
+ 
+ // Initialize static members
+@@ -295,6 +296,17 @@ static void *handle_connection(void *arg) {
+ 
+     thd_manager->add_thd(thd);
+ 
++    auto sched_affinity_manager =
++        sched_affinity::Sched_affinity_manager::get_instance();
++    int sched_affinty_group_index = -1;
++    bool bind_succeed = false;
++    if (sched_affinity_manager != nullptr) {
++      if (!(bind_succeed = sched_affinity_manager->dynamic_bind(
++                sched_affinty_group_index))) {
++        LogErr(ERROR_LEVEL, ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "foreground");
++      }
++    }
++
+     if (thd_prepare_connection(thd))
+       handler_manager->inc_aborted_connects();
+     else {
+@@ -305,6 +317,12 @@ static void *handle_connection(void *arg) {
+     }
+     close_connection(thd, 0, false, false);
+ 
++    if (bind_succeed && sched_affinity_manager != nullptr) {
++      if (!sched_affinity_manager->dynamic_unbind(sched_affinty_group_index)) {
++        LogErr(ERROR_LEVEL, ER_CANNOT_UNSET_THREAD_SCHED_AFFINIFY, "foreground");
++      }
++    }
++
+     thd->get_stmt_da()->reset_diagnostics_area();
+     thd->release_resources();
+ 
+diff --git a/sql/mysqld.cc b/sql/mysqld.cc
+index 85b93bbf97e..4344c4f970a 100644
+--- a/sql/mysqld.cc
++++ b/sql/mysqld.cc
+@@ -614,6 +614,7 @@ The documentation is based on the source files such as:
+ #include "sql/binlog.h"     // mysql_bin_log
+ #include "sql/bootstrap.h"  // bootstrap
+ #include "sql/check_stack.h"
++#include "sql/sched_affinity_manager.h"
+ #include "sql/conn_handler/connection_acceptor.h"  // Connection_acceptor
+ #include "sql/conn_handler/connection_handler_impl.h"  // Per_thread_connection_handler
+ #include "sql/conn_handler/connection_handler_manager.h"  // Connection_handler_manager
+@@ -1018,6 +1019,7 @@ ulong opt_keyring_migration_port = 0;
+ bool migrate_connect_options = false;
+ uint host_cache_size;
+ ulong log_error_verbosity = 3;  // have a non-zero value during early start-up
++extern std::map<sched_affinity::Thread_type, char*> sched_affinity_parameter;
+ 
+ #if defined(_WIN32)
+ /*
+@@ -2384,6 +2386,7 @@ static void clean_up(bool print_message) {
+   */
+   sys_var_end();
+   free_status_vars();
++  sched_affinity::Sched_affinity_manager::free_instance();
+ 
+   if (have_statement_timeout == SHOW_OPTION_YES) my_timer_deinitialize();
+ 
+@@ -6682,6 +6685,11 @@ int mysqld_main(int argc, char **argv)
+   /* Determine default TCP port and unix socket name */
+   set_ports();
+ 
++  if (sched_affinity::Sched_affinity_manager::create_instance(sched_affinity_parameter) == nullptr) {
++    LogErr(ERROR_LEVEL, ER_CANNOT_CREATE_SCHED_AFFINITY_MANAGER);
++    unireg_abort(MYSQLD_ABORT_EXIT);
++  }
++
+   if (init_server_components()) unireg_abort(MYSQLD_ABORT_EXIT);
+ 
+   if (!server_id_supplied)
+@@ -8197,6 +8205,30 @@ static int show_queries(THD *thd, SHOW_VAR *var, char *) {
+   return 0;
+ }
+ 
++static int show_sched_affinity_status(THD *, SHOW_VAR *var, char *buff) {
++  var->type = SHOW_CHAR;
++  var->value = buff;
++  sched_affinity::Sched_affinity_manager::get_instance()->take_snapshot(
++      buff, SHOW_VAR_FUNC_BUFF_SIZE + 1);
++  return 0;
++}
++
++static int show_sched_affinity_group_number(THD *, SHOW_VAR *var, char *buff) {
++  var->type = SHOW_SIGNED_INT;
++  var->value = buff;
++  *(reinterpret_cast<int32 *>(buff)) = sched_affinity::Sched_affinity_manager::get_instance()
++                             ->get_total_node_number();                    
++  return 0;
++}
++
++static int show_sched_affinity_group_capacity(THD *, SHOW_VAR *var, char *buff) {
++  var->type = SHOW_SIGNED_INT;
++  var->value = buff;
++  *(reinterpret_cast<int32 *>(buff)) = sched_affinity::Sched_affinity_manager::get_instance()
++                             ->get_cpu_number_per_node();
++  return 0;
++}
++
+ static int show_net_compression(THD *thd, SHOW_VAR *var, char *buff) {
+   var->type = SHOW_MY_BOOL;
+   var->value = buff;
+@@ -8780,6 +8812,9 @@ SHOW_VAR status_vars[] = {
+     {"Queries", (char *)&show_queries, SHOW_FUNC, SHOW_SCOPE_ALL},
+     {"Questions", (char *)offsetof(System_status_var, questions),
+      SHOW_LONGLONG_STATUS, SHOW_SCOPE_ALL},
++    {"Sched_affinity_status", (char *)&show_sched_affinity_status, SHOW_FUNC, SHOW_SCOPE_ALL},
++    {"Sched_affinity_group_number", (char *)&show_sched_affinity_group_number, SHOW_FUNC, SHOW_SCOPE_ALL},
++    {"Sched_affinity_group_capacity", (char *)&show_sched_affinity_group_capacity, SHOW_FUNC, SHOW_SCOPE_ALL},
+     {"Secondary_engine_execution_count",
+      (char *)offsetof(System_status_var, secondary_engine_execution_count),
+      SHOW_LONGLONG_STATUS, SHOW_SCOPE_ALL},
+@@ -10584,6 +10619,7 @@ PSI_mutex_key key_mts_gaq_LOCK;
+ PSI_mutex_key key_thd_timer_mutex;
+ PSI_mutex_key key_commit_order_manager_mutex;
+ PSI_mutex_key key_mutex_slave_worker_hash;
++PSI_mutex_key key_sched_affinity_mutex;
+ 
+ /* clang-format off */
+ static PSI_mutex_info all_server_mutexes[]=
+@@ -10671,7 +10707,8 @@ static PSI_mutex_info all_server_mutexes[]=
+   { &key_LOCK_password_reuse_interval, "LOCK_password_reuse_interval", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
+   { &key_LOCK_keyring_operations, "LOCK_keyring_operations", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
+   { &key_LOCK_tls_ctx_options, "LOCK_tls_ctx_options", 0, 0, "A lock to control all of the --ssl-* CTX related command line options"},
+-  { &key_LOCK_rotate_binlog_master_key, "LOCK_rotate_binlog_master_key", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME}
++  { &key_LOCK_rotate_binlog_master_key, "LOCK_rotate_binlog_master_key", PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME},
++  { &key_sched_affinity_mutex, "Sched_affinity::m_mutex", 0, 0, PSI_DOCUMENT_ME}
+ };
+ /* clang-format on */
+ 
+diff --git a/sql/mysqld.h b/sql/mysqld.h
+index 9ec03463956..17fb72c7986 100644
+--- a/sql/mysqld.h
++++ b/sql/mysqld.h
+@@ -441,6 +441,7 @@ extern PSI_mutex_key key_thd_timer_mutex;
+ 
+ extern PSI_mutex_key key_commit_order_manager_mutex;
+ extern PSI_mutex_key key_mutex_slave_worker_hash;
++extern PSI_mutex_key key_sched_affinity_mutex;
+ 
+ extern PSI_rwlock_key key_rwlock_LOCK_logger;
+ extern PSI_rwlock_key key_rwlock_channel_map_lock;
+diff --git a/sql/sched_affinity_manager.cc b/sql/sched_affinity_manager.cc
+new file mode 100644
+index 00000000000..20c03778ef7
+--- /dev/null
++++ b/sql/sched_affinity_manager.cc
+@@ -0,0 +1,305 @@
++#include "sql/sched_affinity_manager.h"
++
++#include "mysql/components/services/log_builtins.h"
++#include "mysqld_error.h"
++#include "sql/mysqld.h"
++
++#ifdef HAVE_LIBNUMA
++#include <cstdio>
++#endif /* HAVE_LIBNUMA */
++
++#ifdef HAVE_LIBNUMA
++namespace sched_affinity {
++
++const Thread_type thread_types[] = {
++    Thread_type::FOREGROUND,         Thread_type::LOG_WRITER,
++    Thread_type::LOG_FLUSHER,        Thread_type::LOG_WRITE_NOTIFIER,
++    Thread_type::LOG_FLUSH_NOTIFIER, Thread_type::LOG_CLOSER,
++    Thread_type::LOG_CHECKPOINTER,   Thread_type::PURGE_COORDINATOR};
++
++class Lock_guard {
++ public:
++  explicit Lock_guard(mysql_mutex_t &mutex) {
++    m_mutex = &mutex;
++    mysql_mutex_lock(m_mutex);
++  }
++  Lock_guard(const Lock_guard &) = delete;
++  Lock_guard &operator=(const Lock_guard &) = delete;
++  ~Lock_guard() { mysql_mutex_unlock(m_mutex); }
++
++ private:
++  mysql_mutex_t *m_mutex;
++};
++
++Sched_affinity_manager_numa::Sched_affinity_manager_numa()
++    : Sched_affinity_manager() {
++  mysql_mutex_init(key_sched_affinity_mutex, &m_mutex, nullptr);
++
++  m_total_cpu_num = 0;
++  m_total_node_num = 0;
++  m_cpu_num_per_node = 0;
++  m_process_bitmask = nullptr;
++  for (const auto &i : thread_types) {
++    m_thread_sched_enabled[i] = false;
++    m_thread_bitmask[i] = nullptr;
++  }
++}
++
++Sched_affinity_manager_numa::~Sched_affinity_manager_numa() {
++  mysql_mutex_destroy(&m_mutex);
++
++  if (m_process_bitmask != nullptr) {
++    numa_free_cpumask(m_process_bitmask);
++    m_process_bitmask = nullptr;
++  }
++  for (const auto &i : thread_types) {
++    if (m_thread_bitmask[i] != nullptr) {
++      numa_free_cpumask(m_thread_bitmask[i]);
++      m_thread_bitmask[i] = nullptr;
++    }
++  }
++  for (auto sched_affinity_group : m_sched_affinity_group) {
++    if (sched_affinity_group.avail_cpu_mask != nullptr) {
++      numa_free_cpumask(sched_affinity_group.avail_cpu_mask);
++      sched_affinity_group.avail_cpu_mask = nullptr;
++    }
++  }
++}
++
++bool Sched_affinity_manager_numa::init(
++    const std::map<Thread_type, char *> &sched_affinity_parameter) {
++  if (!init_sched_affinity_info(sched_affinity_parameter)) {
++    return false;
++  }
++  if (!init_sched_affinity_group()) {
++    return false;
++  }
++  return true;
++}
++
++bool Sched_affinity_manager_numa::init_sched_affinity_info(
++    const std::map<Thread_type, char *> &sched_affinity_parameter) {
++  m_total_cpu_num = numa_num_configured_cpus();
++  m_total_node_num = numa_num_configured_nodes();
++  m_cpu_num_per_node = m_total_cpu_num / m_total_node_num;
++
++  m_process_bitmask = numa_allocate_cpumask();
++  numa_sched_getaffinity(0, m_process_bitmask);
++
++  for (const auto &p : sched_affinity_parameter) {
++    if (p.second == nullptr) {
++      continue;
++    } else if ((m_thread_bitmask[p.first] = numa_parse_cpustring(p.second)) ==
++               nullptr) {
++      LogErr(ERROR_LEVEL, ER_CANT_PARSE_CPU_STRING, p.second);
++      return false;
++    } else if (!check_thread_process_compatibility(m_thread_bitmask[p.first],
++                                                   m_process_bitmask)) {
++      LogErr(ERROR_LEVEL, ER_SCHED_AFFINITY_THREAD_PROCESS_CONFLICT);
++      return false;
++    }
++    m_thread_sched_enabled[p.first] = true;
++  }
++
++  if (m_thread_sched_enabled[Thread_type::FOREGROUND]) {
++    for (const auto &i : thread_types) {
++      if (i != Thread_type::FOREGROUND && m_thread_sched_enabled[i] &&
++          !check_foreground_background_compatibility(
++              m_thread_bitmask[Thread_type::FOREGROUND], m_thread_bitmask[i])) {
++        LogErr(WARNING_LEVEL, ER_SCHED_AFFINITY_FOREGROUND_BACKGROUND_CONFLICT);
++      }
++    }
++  }
++
++  return true;
++}
++
++bool Sched_affinity_manager_numa::init_sched_affinity_group() {
++  if (!m_thread_sched_enabled[Thread_type::FOREGROUND]) {
++    return true;
++  }
++  m_sched_affinity_group.resize(m_total_node_num);
++
++  bool group_available = false;
++  for (int i = 0; i < m_total_node_num; ++i) {
++    m_sched_affinity_group[i].avail_cpu_num = 0;
++    m_sched_affinity_group[i].avail_cpu_mask = numa_allocate_cpumask();
++    m_sched_affinity_group[i].assigned_thread_num = 0;
++
++    for (int j = m_cpu_num_per_node * i; j < m_cpu_num_per_node * (i + 1);
++         ++j) {
++      if (numa_bitmask_isbitset(m_thread_bitmask[Thread_type::FOREGROUND], j)) {
++        numa_bitmask_setbit(m_sched_affinity_group[i].avail_cpu_mask, j);
++        ++m_sched_affinity_group[i].avail_cpu_num;
++        group_available = true;
++      }
++    }
++  }
++
++  return group_available;
++}
++
++bool Sched_affinity_manager_numa::check_foreground_background_compatibility(
++    bitmask *bm_foreground, bitmask *bm_background) {
++  if (bm_foreground == nullptr || bm_background == nullptr) {
++    return true;
++  }
++  for (auto i = 0; i < m_total_cpu_num; ++i) {
++    if (numa_bitmask_isbitset(bm_foreground, i) &&
++        numa_bitmask_isbitset(bm_background, i)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool Sched_affinity_manager_numa::check_thread_process_compatibility(
++    bitmask *bm_thread, bitmask *bm_proc) {
++  if (bm_thread == nullptr || bm_proc == nullptr) {
++    return true;
++  }
++  for (auto i = 0; i < m_total_cpu_num; ++i) {
++    if (numa_bitmask_isbitset(bm_thread, i) &&
++        !numa_bitmask_isbitset(bm_proc, i)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++bool Sched_affinity_manager_numa::dynamic_bind(int &out) {
++  if (!m_thread_sched_enabled[Thread_type::FOREGROUND]) {
++    out = -1;
++    return true;
++  }
++
++  const Lock_guard lock(m_mutex);
++
++  auto best_index = -1;
++  for (auto i = 0u; i < m_sched_affinity_group.size(); ++i) {
++    if (m_sched_affinity_group[i].avail_cpu_num == 0) {
++      continue;
++    }
++    if (best_index == -1 ||
++        m_sched_affinity_group[i].assigned_thread_num *
++                m_sched_affinity_group[best_index].avail_cpu_num <
++            m_sched_affinity_group[best_index].assigned_thread_num *
++                m_sched_affinity_group[i].avail_cpu_num) {
++      best_index = i;
++    }
++  }
++
++  if (best_index == -1) {
++    out = -1;
++    return false;
++  }
++  auto ret = numa_sched_setaffinity(
++      0, m_sched_affinity_group[best_index].avail_cpu_mask);
++  if (ret == 0) {
++    ++m_sched_affinity_group[best_index].assigned_thread_num;
++    out = best_index;
++    return true;
++  } else {
++    out = -1;
++    return false;
++  }
++}
++
++bool Sched_affinity_manager_numa::dynamic_unbind(const int &index) {
++  if (!m_thread_sched_enabled[Thread_type::FOREGROUND]) {
++    return true;
++  }
++  if (index < 0 || index >= static_cast<int>(m_sched_affinity_group.size())) {
++    return false;
++  }
++  const Lock_guard lock(m_mutex);
++  if (m_sched_affinity_group[index].assigned_thread_num > 0) {
++    --m_sched_affinity_group[index].assigned_thread_num;
++    return true;
++  } else {
++    return false;
++  }
++}
++
++bool Sched_affinity_manager_numa::static_bind(const Thread_type &thread_type) {
++  if (thread_type == Thread_type::FOREGROUND) {
++    return false;
++  }
++  if (!m_thread_sched_enabled[thread_type]) {
++    return true;
++  }
++  auto ret = numa_sched_setaffinity(0, m_thread_bitmask[thread_type]);
++  return ret == 0 ? true : false;
++}
++
++void Sched_affinity_manager_numa::take_snapshot(char *buff, int buff_size) {
++  if (buff == nullptr || buff_size <= 0) {
++    return;
++  }
++  const Lock_guard lock(m_mutex);
++  int used_buff_size = 0;
++  for (auto sched_affinity_group : m_sched_affinity_group) {
++    int used = snprintf(buff + used_buff_size, buff_size - used_buff_size,
++                        "%d/%d; ", sched_affinity_group.assigned_thread_num,
++                        sched_affinity_group.avail_cpu_num);
++    if (used > 0) {
++      used_buff_size += used;
++    }
++    if (used_buff_size + 1 >= buff_size) {
++      break;
++    }
++  }
++}
++
++int Sched_affinity_manager_numa::get_total_node_number() {
++  return m_total_node_num;
++}
++int Sched_affinity_manager_numa::get_cpu_number_per_node() {
++  return m_cpu_num_per_node;
++}
++}  // namespace sched_affinity
++#endif /* HAVE_LIBNUMA */
++
++namespace sched_affinity {
++void Sched_affinity_manager_dummy::take_snapshot(char *buff, int buff_size) {
++  if (buff == nullptr || buff_size <= 0) {
++    return;
++  }
++  buff[0] = '\0';
++}
++
++static Sched_affinity_manager *sched_affinity_manager = nullptr;
++
++Sched_affinity_manager *Sched_affinity_manager::create_instance(
++    const std::map<Thread_type, char *> &sched_affinity_parameter) {
++  Sched_affinity_manager::free_instance();
++#ifdef HAVE_LIBNUMA
++  if (numa_available() == -1) {
++    LogErr(WARNING_LEVEL, ER_NUMA_AVAILABLE_TEST_FAIL);
++    LogErr(INFORMATION_LEVEL, ER_USE_DUMMY_SCHED_AFFINITY_MANAGER);
++    sched_affinity_manager = new Sched_affinity_manager_dummy();
++  } else {
++    sched_affinity_manager = new Sched_affinity_manager_numa();
++  }
++#else
++  LogErr(WARNING_LEVEL, ER_LIBNUMA_TEST_FAIL);
++  LogErr(INFORMATION_LEVEL, ER_USE_DUMMY_SCHED_AFFINITY_MANAGER);
++  sched_affinity_manager = new Sched_affinity_manager_dummy();
++#endif /* HAVE_LIBNUMA */
++  if (!sched_affinity_manager->init(sched_affinity_parameter)) {
++    return nullptr;
++  }
++  return sched_affinity_manager;
++}
++
++Sched_affinity_manager *Sched_affinity_manager::get_instance() {
++  return sched_affinity_manager;
++}
++
++void Sched_affinity_manager::free_instance() {
++  if (sched_affinity_manager != nullptr) {
++    delete sched_affinity_manager;
++    sched_affinity_manager = nullptr;
++  }
++}
++}  // namespace sched_affinity
+diff --git a/sql/sched_affinity_manager.h b/sql/sched_affinity_manager.h
+new file mode 100644
+index 00000000000..5852962e2f3
+--- /dev/null
++++ b/sql/sched_affinity_manager.h
+@@ -0,0 +1,117 @@
++#ifndef SCHED_AFFINITY_MANAGER_H
++#define SCHED_AFFINITY_MANAGER_H
++#include "my_config.h"
++#ifdef HAVE_LIBNUMA
++#include <numa.h>
++#endif
++
++#include <map>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "mysql/psi/mysql_mutex.h"
++
++namespace sched_affinity {
++
++enum class Thread_type {
++  FOREGROUND,
++  LOG_WRITER,
++  LOG_FLUSHER,
++  LOG_WRITE_NOTIFIER,
++  LOG_FLUSH_NOTIFIER,
++  LOG_CLOSER,
++  LOG_CHECKPOINTER,
++  PURGE_COORDINATOR
++};
++
++class Sched_affinity_manager {
++ public:
++  static Sched_affinity_manager *create_instance(
++      const std::map<Thread_type, char *> &);
++  static Sched_affinity_manager *get_instance();
++  static void free_instance();
++
++  virtual bool dynamic_bind(int &) = 0;
++  virtual bool dynamic_unbind(const int &) = 0;
++  virtual bool static_bind(const Thread_type &) = 0;
++  virtual void take_snapshot(char *buff, int buff_size) = 0;
++  virtual int get_total_node_number() = 0;
++  virtual int get_cpu_number_per_node() = 0;
++
++ protected:
++  virtual bool init(const std::map<Thread_type, char *> &) = 0;
++  virtual ~Sched_affinity_manager() {}
++};
++
++class Sched_affinity_manager_dummy : public Sched_affinity_manager {
++ public:
++  Sched_affinity_manager_dummy(const Sched_affinity_manager_dummy &) = delete;
++  Sched_affinity_manager_dummy &operator=(
++      const Sched_affinity_manager_dummy &) = delete;
++  Sched_affinity_manager_dummy(const Sched_affinity_manager_dummy &&) = delete;
++  Sched_affinity_manager_dummy &operator=(
++      const Sched_affinity_manager_dummy &&) = delete;
++
++  bool dynamic_bind(int &) override { return true; }
++  bool dynamic_unbind(const int &) override { return true; }
++  bool static_bind(const Thread_type &) override { return true; }
++  void take_snapshot(char *buff, int buff_size) override;
++  int get_total_node_number() override { return -1; }
++  int get_cpu_number_per_node() override { return -1; }
++
++ private:
++  Sched_affinity_manager_dummy() : Sched_affinity_manager(){};
++  ~Sched_affinity_manager_dummy(){};
++  bool init(const std::map<Thread_type, char *> &) override { return true; }
++  friend class Sched_affinity_manager;
++};
++
++#ifdef HAVE_LIBNUMA
++
++struct Sched_affinity_group {
++  bitmask *avail_cpu_mask;
++  int avail_cpu_num;
++  int assigned_thread_num;
++};
++
++class Sched_affinity_manager_numa : public Sched_affinity_manager {
++ public:
++  Sched_affinity_manager_numa(const Sched_affinity_manager_numa &) = delete;
++  Sched_affinity_manager_numa &operator=(const Sched_affinity_manager_numa &) =
++      delete;
++  Sched_affinity_manager_numa(const Sched_affinity_manager_numa &&) = delete;
++  Sched_affinity_manager_numa &operator=(const Sched_affinity_manager_numa &&) =
++      delete;
++
++  bool dynamic_bind(int &) override;
++  bool dynamic_unbind(const int &) override;
++  bool static_bind(const Thread_type &) override;
++  void take_snapshot(char *buff, int buff_size) override;
++  int get_total_node_number() override;
++  int get_cpu_number_per_node() override;
++
++ private:
++  Sched_affinity_manager_numa();
++  ~Sched_affinity_manager_numa();
++  bool init(const std::map<Thread_type, char *> &) override;
++  bool init_sched_affinity_info(const std::map<Thread_type, char *> &);
++  bool init_sched_affinity_group();
++  bool check_foreground_background_compatibility(bitmask *bm_foreground,
++                                                 bitmask *bm_background);
++  bool check_thread_process_compatibility(bitmask *bm_thread, bitmask *bm_proc);
++  friend class Sched_affinity_manager;
++
++ private:
++  std::vector<Sched_affinity_group> m_sched_affinity_group;
++  int m_total_cpu_num;
++  int m_total_node_num;
++  int m_cpu_num_per_node;
++  bitmask *m_process_bitmask;
++  std::map<Thread_type, bitmask *> m_thread_bitmask;
++  std::map<Thread_type, bool> m_thread_sched_enabled;
++  mysql_mutex_t m_mutex;
++};
++#endif /* HAVE_LIBNUMA */
++}  // namespace sched_affinity
++#endif /* SCHED_AFFINITY_MANAGER_H */
+diff --git a/sql/sys_vars.cc b/sql/sys_vars.cc
+index 5fb773ed7bf..97001bafe20 100644
+--- a/sql/sys_vars.cc
++++ b/sql/sys_vars.cc
+@@ -134,6 +134,7 @@
+ #include "sql/transaction.h"  // trans_commit_stmt
+ #include "sql/transaction_info.h"
+ #include "sql/xa.h"
++#include "sql/sched_affinity_manager.h"
+ #include "template_utils.h"  // pointer_cast
+ #include "thr_lock.h"
+ #ifdef _WIN32
+@@ -1390,6 +1391,64 @@ static bool on_session_track_gtids_update(sys_var *, THD *thd, enum_var_type) {
+   return false;
+ }
+ 
++std::map<sched_affinity::Thread_type, char *> sched_affinity_parameter = {
++    {sched_affinity::Thread_type::FOREGROUND, nullptr},
++    {sched_affinity::Thread_type::LOG_WRITER, nullptr},
++    {sched_affinity::Thread_type::LOG_FLUSHER, nullptr},
++    {sched_affinity::Thread_type::LOG_WRITE_NOTIFIER, nullptr},
++    {sched_affinity::Thread_type::LOG_FLUSH_NOTIFIER, nullptr},
++    {sched_affinity::Thread_type::LOG_CLOSER, nullptr},
++    {sched_affinity::Thread_type::LOG_CHECKPOINTER, nullptr},
++    {sched_affinity::Thread_type::PURGE_COORDINATOR, nullptr}};
++
++static Sys_var_charptr Sys_sched_affinity_foreground_thread(
++    "sched_affinity_foreground_thread",
++    "The set of cpus which foreground threads will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::FOREGROUND]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET, DEFAULT(nullptr));
++
++static Sys_var_charptr Sys_sched_affinity_log_writer(
++    "sched_affinity_log_writer",
++    "The set of cpus which log writer thread will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::LOG_WRITER]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET, DEFAULT(nullptr));
++
++static Sys_var_charptr Sys_sched_affinity_log_flusher(
++    "sched_affinity_log_flusher",
++    "The set of cpus which log flusher thread will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::LOG_FLUSHER]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET, DEFAULT(nullptr));
++
++static Sys_var_charptr Sys_sched_affinity_log_write_notifier(
++    "sched_affinity_log_write_notifier",
++    "The set of cpus which log write notifier thread will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::LOG_WRITE_NOTIFIER]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET,  DEFAULT(nullptr));
++
++static Sys_var_charptr Sys_sched_affinity_log_flush_notifier(
++    "sched_affinity_log_flush_notifier",
++    "The set of cpus which log flush notifier thread will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::LOG_FLUSH_NOTIFIER]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET, DEFAULT(nullptr));
++
++static Sys_var_charptr Sys_sched_affinity_log_closer(
++    "sched_affinity_log_closer",
++    "The set of cpus which log closer thread will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::LOG_CLOSER]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET, DEFAULT(nullptr));
++
++static Sys_var_charptr Sys_sched_affinity_log_checkpointer(
++    "sched_affinity_log_checkpointer",
++    "The set of cpus which log checkpointer thread will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::LOG_CHECKPOINTER]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET, DEFAULT(nullptr));
++
++static Sys_var_charptr Sys_sched_affinity_purge_coordinator(
++    "sched_affinity_purge_coordinator",
++    "The set of cpus which purge coordinator thread will run on.",
++    READ_ONLY GLOBAL_VAR(sched_affinity_parameter[sched_affinity::Thread_type::PURGE_COORDINATOR]), CMD_LINE(REQUIRED_ARG),
++    IN_FS_CHARSET,  DEFAULT(nullptr));
++
+ static const char *session_track_gtids_names[] = {"OFF", "OWN_GTID",
+                                                   "ALL_GTIDS", NullS};
+ static Sys_var_enum Sys_session_track_gtids(
+diff --git a/storage/innobase/log/log0chkp.cc b/storage/innobase/log/log0chkp.cc
+index 53ebaf8b16c..5c1712e9b06 100644
+--- a/storage/innobase/log/log0chkp.cc
++++ b/storage/innobase/log/log0chkp.cc
+@@ -66,6 +66,7 @@ the file COPYING.Google.
+ #include "trx0roll.h"
+ #include "trx0sys.h"
+ #include "trx0trx.h"
++#include "sql/sched_affinity_manager.h"
+ 
+ #ifndef UNIV_HOTBACKUP
+ 
+@@ -953,6 +954,13 @@ static bool log_consider_checkpoint(log_t &log) {
+ }
+ 
+ void log_checkpointer(log_t *log_ptr) {
++  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
++  if (sched_affinity_manager!=nullptr){
++    if(!sched_affinity_manager->static_bind(sched_affinity::Thread_type::LOG_CHECKPOINTER)){
++      ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "log_checkpointer");
++    }
++  }
++
+   ut_a(log_ptr != nullptr);
+ 
+   log_t &log = *log_ptr;
+diff --git a/storage/innobase/log/log0write.cc b/storage/innobase/log/log0write.cc
+index d55b010e1ee..bcae7c02457 100644
+--- a/storage/innobase/log/log0write.cc
++++ b/storage/innobase/log/log0write.cc
+@@ -69,6 +69,7 @@ the file COPYING.Google.
+ #include "trx0roll.h"
+ #include "trx0sys.h"
+ #include "trx0trx.h"
++#include "sql/sched_affinity_manager.h"
+ 
+ /**************************************************/ /**
+  @page PAGE_INNODB_REDO_LOG_THREADS Background redo log threads
+@@ -1964,6 +1965,13 @@ static void log_writer_write_buffer(log_t &log, lsn_t next_write_lsn) {
+ }
+ 
+ void log_writer(log_t *log_ptr) {
++  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
++  if (sched_affinity_manager!=nullptr){
++    if(!sched_affinity_manager->static_bind(sched_affinity::Thread_type::LOG_WRITER)){
++      ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "log_writer");
++    }
++  }
++
+   ut_a(log_ptr != nullptr);
+ 
+   log_t &log = *log_ptr;
+@@ -2202,6 +2210,13 @@ static void log_flush_low(log_t &log) {
+ }
+ 
+ void log_flusher(log_t *log_ptr) {
++  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
++  if (sched_affinity_manager!=nullptr){
++    if(!sched_affinity_manager->static_bind(sched_affinity::Thread_type::LOG_FLUSHER)){
++      ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "log_flusher");
++    }
++  }
++
+   ut_a(log_ptr != nullptr);
+ 
+   log_t &log = *log_ptr;
+@@ -2330,6 +2345,13 @@ void log_flusher(log_t *log_ptr) {
+ /* @{ */
+ 
+ void log_write_notifier(log_t *log_ptr) {
++  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
++  if (sched_affinity_manager!=nullptr){
++    if(!sched_affinity_manager->static_bind(sched_affinity::Thread_type::LOG_WRITE_NOTIFIER)){
++      ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "log_write_notifier");
++    }
++  }
++
+   ut_a(log_ptr != nullptr);
+ 
+   log_t &log = *log_ptr;
+@@ -2429,6 +2451,13 @@ void log_write_notifier(log_t *log_ptr) {
+ /* @{ */
+ 
+ void log_flush_notifier(log_t *log_ptr) {
++  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
++  if (sched_affinity_manager!=nullptr){
++    if(!sched_affinity_manager->static_bind(sched_affinity::Thread_type::LOG_FLUSH_NOTIFIER)){
++      ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "log_flush_notifier");
++    }
++  }
++
+   ut_a(log_ptr != nullptr);
+ 
+   log_t &log = *log_ptr;
+@@ -2528,6 +2557,13 @@ void log_flush_notifier(log_t *log_ptr) {
+ /* @{ */
+ 
+ void log_closer(log_t *log_ptr) {
++  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
++  if (sched_affinity_manager!=nullptr){
++    if(!sched_affinity_manager->static_bind(sched_affinity::Thread_type::LOG_CLOSER)){
++      ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "log_closer");
++    }
++  }
++
+   ut_a(log_ptr != nullptr);
+ 
+   log_t &log = *log_ptr;
+diff --git a/storage/innobase/srv/srv0srv.cc b/storage/innobase/srv/srv0srv.cc
+index efb6e472be0..bd74a48c101 100644
+--- a/storage/innobase/srv/srv0srv.cc
++++ b/storage/innobase/srv/srv0srv.cc
+@@ -89,6 +89,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
+ #include "ut0crc32.h"
+ #endif /* !UNIV_HOTBACKUP */
+ #include "ut0mem.h"
++#include "sql/sched_affinity_manager.h"
+ 
+ #ifdef UNIV_HOTBACKUP
+ #include "page0size.h"
+@@ -3012,6 +3013,13 @@ static void srv_purge_coordinator_suspend(
+ 
+ /** Purge coordinator thread that schedules the purge tasks. */
+ void srv_purge_coordinator_thread() {
++  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
++  if (sched_affinity_manager!=nullptr){
++    if(!sched_affinity_manager->static_bind(sched_affinity::Thread_type::PURGE_COORDINATOR)){
++      ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "purge_coordinator");
++    }
++  }
++
+   srv_slot_t *slot;
+ 
+ #ifdef UNIV_PFS_THREAD
+diff --git a/unittest/gunit/CMakeLists.txt b/unittest/gunit/CMakeLists.txt
+index 2650e439c98..c1a2996826d 100644
+--- a/unittest/gunit/CMakeLists.txt
++++ b/unittest/gunit/CMakeLists.txt
+@@ -246,6 +246,7 @@ SET(SERVER_TESTS
+   protocol_classic
+   regexp_engine
+   regexp_facade
++  sched_affinity_manager
+   security_context
+   segfault
+   select_lex_visitor
+diff --git a/unittest/gunit/sched_affinity_manager-t.cc b/unittest/gunit/sched_affinity_manager-t.cc
+new file mode 100644
+index 00000000000..aa58934a11d
+--- /dev/null
++++ b/unittest/gunit/sched_affinity_manager-t.cc
+@@ -0,0 +1,42 @@
++#include "gtest/gtest.h"
++#include "my_config.h"
++#include "sql/sched_affinity_manager.h"
++
++#ifdef HAVE_LIBNUMA
++
++using ::sched_affinity::Sched_affinity_manager;
++using ::sched_affinity::Sched_affinity_manager_numa;
++using ::sched_affinity::Thread_type;
++using ::testing::TestInfo;
++
++namespace {
++bool skip_if_numa_unavailable() {
++  if (numa_available() == -1) {
++    SUCCEED() << "Skip test case as numa is unavailable.";
++    return true;
++  } else {
++    return false;
++  }
++}
++}  // namespace
++
++class SchedAffinityManagerTest : public ::testing::Test {
++ protected:
++  void SetUp() {}
++  void TearDown() {}
++};
++
++TEST_F(SchedAffinityManagerTest, DefaultConfig) {
++  if (skip_if_numa_unavailable()) {
++    return;
++  }
++  std::map<Thread_type, char *> default_config;
++  auto instance = Sched_affinity_manager::create_instance(default_config);
++  ASSERT_NE(instance, nullptr);
++  ASSERT_EQ(typeid(*instance), typeid(Sched_affinity_manager_numa));
++
++  ASSERT_TRUE(instance->get_total_node_number() > 0);
++  ASSERT_TRUE(instance->get_cpu_number_per_node() > 0);
++}
++
++#endif /* HAVE_LIBNUMA */
+\ No newline at end of file
+-- 
+2.28.0.windows.1
+
