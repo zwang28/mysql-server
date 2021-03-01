@@ -30,7 +30,7 @@ TEST_F(SchedAffinityManagerTest, DefaultConfig) {
   if (skip_if_numa_unavailable()) {
     return;
   }
-  std::map<Thread_type, char *> default_config;
+  std::map<Thread_type, const char *> default_config;
   auto instance = Sched_affinity_manager::create_instance(default_config);
   ASSERT_NE(instance, nullptr);
   ASSERT_EQ(typeid(*instance), typeid(Sched_affinity_manager_numa));
