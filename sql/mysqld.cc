@@ -799,6 +799,7 @@ The documentation is based on the source files such as:
 #include "sql/server_component/log_builtins_imp.h"
 #include "sql/server_component/persistent_dynamic_loader_imp.h"
 #include "sql/srv_session.h"
+#include "minitrace/minitrace.h"
 
 using std::max;
 using std::min;
@@ -6165,6 +6166,7 @@ int win_main(int argc, char **argv)
 int mysqld_main(int argc, char **argv)
 #endif
 {
+  mtr_init("binlog_tracing.json");
   // Substitute the full path to the executable in argv[0]
   substitute_progpath(argv);
   sysd::notify_connect();
@@ -7247,6 +7249,8 @@ int mysqld_main(int argc, char **argv)
     LogErr(WARNING_LEVEL, ER_CANT_JOIN_SHUTDOWN_THREAD, "signal_", ret);
 #endif  // _WIN32
 
+  mtr_flush();
+  mtr_shutdown();
   clean_up(true);
   sysd::notify("STATUS=Server shutdown complete");
   mysqld_exit(signal_hand_thr_exit_code);

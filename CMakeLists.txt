@@ -1092,6 +1092,7 @@ INCLUDE_DIRECTORIES(
   ${CMAKE_CURRENT_BINARY_DIR}/include
   ${CMAKE_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/minitrace
   )
 
 IF(WITH_LTO)
@@ -1434,6 +1435,7 @@ ADD_SUBDIRECTORY(mysys)
 ADD_SUBDIRECTORY(libmysql)
 ADD_SUBDIRECTORY(libbinlogevents)
 ADD_SUBDIRECTORY(libbinlogstandalone)
+ADD_SUBDIRECTORY(minitrace)
 
 IF(NOT WITHOUT_SERVER)
   # Build failure on Solaris 11.3 for debug builds with NDBCLUSTER.
