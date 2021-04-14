@@ -128,6 +128,7 @@
 #include "sql/xa.h"
 #include "sql_partition.h"
 #include "thr_lock.h"
+#include "minitrace/minitrace.h"
 
 class Item;
 
@@ -8778,11 +8779,19 @@ int MYSQL_BIN_LOG::ordered_commit(THD *thd, bool all, bool skip_commit) {
     goto commit_stage;
   }
   DEBUG_SYNC(thd, "waiting_in_the_middle_of_flush_stage");
+  MTR_BEGIN("BINLOG_TRACING","stage#1");
+
+  MTR_BEGIN("BINLOG_TRACING","process_flush_stage_queue");
   flush_error =
       process_flush_stage_queue(&total_bytes, &do_rotate, &wait_queue);
+  MTR_END("BINLOG_TRACING","process_flush_stage_queue");
 
   if (flush_error == 0 && total_bytes > 0)
+  {
+    MTR_BEGIN("BINLOG_TRACING","flush_cache_to_file");
     flush_error = flush_cache_to_file(&flush_end_pos);
+    MTR_END("BINLOG_TRACING","flush_cache_to_file");
+  }
   DBUG_EXECUTE_IF("crash_after_flush_binlog", DBUG_SUICIDE(););
 
   update_binlog_end_pos_after_sync = (get_sync_period() == 1);
@@ -8813,6 +8822,7 @@ int MYSQL_BIN_LOG::ordered_commit(THD *thd, bool all, bool skip_commit) {
     */
     handle_binlog_flush_or_sync_error(thd, false /* need_lock_log */, nullptr);
   }
+  MTR_END("BINLOG_TRACING","stage#1");
 
   DEBUG_SYNC(thd, "bgc_after_flush_stage_before_sync_stage");
 
@@ -8827,6 +8837,7 @@ int MYSQL_BIN_LOG::ordered_commit(THD *thd, bool all, bool skip_commit) {
     return finish_commit(thd);
   }
 
+  MTR_BEGIN("BINLOG_TRACING","stage#2");
   /*
     Shall introduce a delay only if it is going to do sync
     in this ongoing SYNC stage. The "+1" used below in the
@@ -8845,7 +8856,9 @@ int MYSQL_BIN_LOG::ordered_commit(THD *thd, bool all, bool skip_commit) {
 
   if (flush_error == 0 && total_bytes > 0) {
     DEBUG_SYNC(thd, "before_sync_binlog_file");
+    MTR_BEGIN("BINLOG_TRACING","sync_binlog_file");
     std::pair<bool, bool> result = sync_binlog_file(false);
+    MTR_END("BINLOG_TRACING","sync_binlog_file");
     sync_error = result.first;
   }
 
@@ -8860,6 +8873,8 @@ int MYSQL_BIN_LOG::ordered_commit(THD *thd, bool all, bool skip_commit) {
       update_binlog_end_pos(binlog_file, pos);
     }
   }
+
+  MTR_END("BINLOG_TRACING","stage#2");
 
   DEBUG_SYNC(thd, "bgc_after_sync_stage_before_commit_stage");
 
@@ -8891,6 +8906,7 @@ commit_stage:
                             thd->commit_error));
       return finish_commit(thd);
     }
+    MTR_BEGIN("BINLOG_TRACING","stage#3");
     THD *commit_queue =
         Commit_stage_manager::get_instance().fetch_queue_acquire_lock(
             Commit_stage_manager::COMMIT_STAGE);
@@ -8936,6 +8952,7 @@ commit_stage:
   if (sync_error)
     handle_binlog_flush_or_sync_error(thd, true /* need_lock_log */, nullptr);
 
+  MTR_END("BINLOG_TRACING","stage#3");
   DEBUG_SYNC(thd, "before_signal_done");
   /* Commit done so signal all waiting threads */
   Commit_stage_manager::get_instance().signal_done(final_queue);
