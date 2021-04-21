@@ -48,6 +48,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef UNIV_HOTBACKUP
 #include <mysqld.h>
 #include <sys/types.h>
+#include <unistd.h>
 #include <time.h>
 
 #include <chrono>
@@ -89,6 +90,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0crc32.h"
 #endif /* !UNIV_HOTBACKUP */
 #include "ut0mem.h"
+#include "sql/sched_affinity_manager.h"
 
 #ifdef UNIV_HOTBACKUP
 #include "page0size.h"
@@ -3012,6 +3014,16 @@ static void srv_purge_coordinator_suspend(
 
 /** Purge coordinator thread that schedules the purge tasks. */
 void srv_purge_coordinator_thread() {
+  auto sched_affinity_manager = sched_affinity::Sched_affinity_manager::get_instance();
+  bool is_registered_to_sched_affinity = false;
+  auto pid = sched_affinity::gettid();
+  if (sched_affinity_manager == nullptr ||
+      !(is_registered_to_sched_affinity =
+            sched_affinity_manager->register_thread(
+                sched_affinity::Thread_type::PURGE_COORDINATOR, pid))) {
+    ib::error(ER_CANNOT_SET_THREAD_SCHED_AFFINIFY, "purge_coordinator");
+  }
+
   srv_slot_t *slot;
 
 #ifdef UNIV_PFS_THREAD
@@ -3124,6 +3136,12 @@ void srv_purge_coordinator_thread() {
   srv_thread_delay_cleanup_if_needed(false);
 
   destroy_thd(thd);
+
+  if (is_registered_to_sched_affinity &&
+      !sched_affinity_manager->unregister_thread(
+          sched_affinity::Thread_type::PURGE_COORDINATOR, pid)) {
+    ib::error(ER_CANNOT_UNSET_THREAD_SCHED_AFFINIFY, "purge_coordinator");
+  }
 }
 
 /** Enqueues a task to server task queue and releases a worker thread, if there
