@@ -94,8 +94,10 @@ bool Sched_affinity_manager_numa::init(
       return false;
     }
     if (is_thread_sched_enabled(thread_type) &&
-        !init_sched_affinity_group(m_thread_bitmask[thread_type], m_numa_aware,
-                                   m_sched_affinity_groups[thread_type])) {
+        !init_sched_affinity_group(
+            m_thread_bitmask[thread_type],
+            m_numa_aware && thread_type == Thread_type::FOREGROUND,
+            m_sched_affinity_groups[thread_type])) {
       return false;
     }
   }
@@ -223,7 +225,8 @@ bool Sched_affinity_manager_numa::rebalance_group(
 bool Sched_affinity_manager_numa::reset_sched_affinity_info(
     const char *cpu_string, const Thread_type &thread_type,
     std::vector<std::set<pid_t>> &group_thread) {
-  group_thread.resize(m_numa_aware ? m_total_node_num : 1, std::set<pid_t>());
+  bool numa_aware = m_numa_aware && thread_type == Thread_type::FOREGROUND;
+  group_thread.resize(numa_aware ? m_total_node_num : 1, std::set<pid_t>());
   for (const auto tid : m_thread_pid[thread_type]) {
     const auto group_index = m_pid_group_id[tid];
     group_thread[group_index].insert(tid);
@@ -234,7 +237,7 @@ bool Sched_affinity_manager_numa::reset_sched_affinity_info(
     return false;
   }
   if (is_thread_sched_enabled(thread_type) &&
-      !init_sched_affinity_group(m_thread_bitmask[thread_type], m_numa_aware,
+      !init_sched_affinity_group(m_thread_bitmask[thread_type], numa_aware,
                                  m_sched_affinity_groups[thread_type])) {
     return false;
   }
@@ -547,8 +550,10 @@ bool Sched_affinity_manager_numa::update_numa_aware(bool numa_aware) {
   m_numa_aware = numa_aware;
   for (const auto &thread_type : thread_types) {
     if (is_thread_sched_enabled(thread_type) &&
-        !init_sched_affinity_group(m_thread_bitmask[thread_type], m_numa_aware,
-                                   m_sched_affinity_groups[thread_type])) {
+        !init_sched_affinity_group(
+            m_thread_bitmask[thread_type],
+            m_numa_aware && thread_type == Thread_type::FOREGROUND,
+            m_sched_affinity_groups[thread_type])) {
       fallback();
       return false;
     }
