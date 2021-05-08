@@ -321,7 +321,7 @@ bool Sched_affinity_manager_numa::register_thread(const Thread_type thread_type,
   m_thread_pid[thread_type].insert(pid);
   if (!bind_to_group(pid)) {
     LogErr(ERROR_LEVEL, ER_CANNOT_SET_THREAD_SCHED_AFFINIFY,
-           thread_type_names.at(thread_type));
+           thread_type_names.at(thread_type).c_str());
     fallback();
     return false;
   }
@@ -343,7 +343,7 @@ bool Sched_affinity_manager_numa::unregister_thread(const pid_t pid) {
 
   if (!unbind_from_group(pid)) {
     LogErr(ERROR_LEVEL, ER_CANNOT_UNSET_THREAD_SCHED_AFFINIFY,
-           thread_type_names.at(thread_type));
+           thread_type_names.at(thread_type).c_str());
     fallback();
     return false;
   }
@@ -536,10 +536,10 @@ bool Sched_affinity_manager_numa::update_numa_aware(bool numa_aware) {
   std::transform(m_pid_group_id.begin(), m_pid_group_id.end(),
                  pending_pids.begin(),
                  [](auto &pid_group_id) { return pid_group_id.first; });
-  for (const auto &pid_group_id : m_pid_group_id) {
-    if (!unbind_from_group(pid_group_id.first)) {
+  for (const auto &pending_pid : pending_pids) {
+    if (!unbind_from_group(pending_pid)) {
       LogErr(ERROR_LEVEL, ER_CANNOT_UNSET_THREAD_SCHED_AFFINIFY,
-             thread_type_names.at(get_thread_type_by_pid(pid_group_id.first)));
+             thread_type_names.at(get_thread_type_by_pid(pending_pid)).c_str());
       fallback();
       return false;
     }
@@ -556,7 +556,7 @@ bool Sched_affinity_manager_numa::update_numa_aware(bool numa_aware) {
   for (const auto &pending_pid : pending_pids) {
     if (!bind_to_group(pending_pid)) {
       LogErr(ERROR_LEVEL, ER_CANNOT_SET_THREAD_SCHED_AFFINIFY,
-             thread_type_names.at(get_thread_type_by_pid(pending_pid)));
+             thread_type_names.at(get_thread_type_by_pid(pending_pid)).c_str());
       fallback();
       return false;
     }
