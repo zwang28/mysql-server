@@ -1,0 +1,39 @@
+# Start with thread_handling=pool-of-threads
+
+--source include/have_pool_of_threads.inc
+
+connect(conn1,127.0.0.1,root);
+connect(conn2,127.0.0.1,root);
+
+connection conn1;
+--let $conn1_id = `SELECT connection_id()`
+SEND SELECT benchmark(9999999999, md5('very long command 1'));
+
+--sleep 1
+
+connection conn2;
+--let $conn2_id = `SELECT connection_id()`
+SEND SELECT benchmark(9999999999, md5('very long command 2'));
+
+# Test that new connection cannot be established
+--disable_abort_on_error
+--echo You should see a Lost connection message
+connect(conn3,127.0.0.1,root);
+--enable_abort_on_error
+
+connect(extracon,127.0.0.1,root,,,$MASTER_EXTRA_PORT);
+connection extracon;
+--let $conn_id_number=`SELECT COUNT(ID) FROM information_schema.processlist WHERE USER="unauthenticated user" AND HOST="connecting host" AND COMMAND="Connect"`
+--echo Found $conn_id_number stuck connections
+
+--disable_query_log
+--eval KILL QUERY $conn1_id
+--eval KILL QUERY $conn2_id
+--enable_query_log
+
+--sleep 1
+
+connection default;
+disconnect conn1;
+disconnect conn2;
+disconnect extracon;

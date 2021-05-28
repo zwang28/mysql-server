@@ -1,0 +1,15 @@
+SELECT benchmark(9999999999, md5('very long command 1'));
+SELECT benchmark(9999999999, md5('very long command 2'));
+SELECT 1;
+queue_length 0
+1
+1
+SELECT 1;
+queue_length 0
+1
+1
+SET GLOBAL debug="+d,threadpool_io_poll_wait_at_lease_2_events";
+SELECT 1;
+SET GLOBAL debug="-d,threadpool_io_poll_wait_at_lease_2_events";
+SELECT 1;
+queue_length 1

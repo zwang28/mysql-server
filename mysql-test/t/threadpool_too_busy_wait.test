@@ -1,0 +1,63 @@
+# Start with thread_handling=pool-of-threads
+
+--source include/have_pool_of_threads.inc
+
+# initialzie data
+CREATE DATABASE db1;
+CREATE TABLE db1.t1 (
+    c1 int NOT NULL,
+    c2 int NOT NULL,
+    PRIMARY KEY (c1)
+);
+INSERT INTO db1.t1 (c1,c2) VALUES (1,11);
+INSERT INTO db1.t1 (c1,c2) VALUES (2,22);
+INSERT INTO db1.t1 (c1,c2) VALUES (3,33);
+
+connect(conn0,127.0.0.1,root,,db1);
+connect(conn1,127.0.0.1,root,,db1);
+connect(conn2,127.0.0.1,root,,db1);
+
+connection conn0;
+START TRANSACTION;
+SELECT * FROM db1.t1 WHERE c1=2 FOR UPDATE;
+
+connection conn1;
+START TRANSACTION;
+SEND SELECT * FROM db1.t1 WHERE c1=2 LOCK IN SHARE MODE;
+
+connection conn2;
+START TRANSACTION;
+SEND SELECT * FROM db1.t1 WHERE c1=2 LOCK IN SHARE MODE;
+
+# Test that new connection cannot be established
+--disable_abort_on_error
+--echo You should see a Lost connection message
+connect(conn3,127.0.0.1,root,,db1);
+--enable_abort_on_error
+
+connect(extracon,127.0.0.1,root,,,$MASTER_EXTRA_PORT);
+connection extracon;
+--let $conn_id_number=`SELECT COUNT(ID) FROM information_schema.processlist WHERE USER="unauthenticated user" AND HOST="connecting host" AND COMMAND="Connect"`
+--echo Found $conn_id_number stuck connections
+
+connection conn0;
+ROLLBACK;
+
+connection conn1;
+REAP;
+ROLLBACK;
+
+connection conn2;
+REAP;
+ROLLBACK;
+
+connection extracon;
+--echo Clean up
+DROP TABLE db1.t1;
+DROP DATABASE db1;
+
+connection default;
+disconnect conn0;
+disconnect conn1;
+disconnect conn2;
+disconnect extracon;

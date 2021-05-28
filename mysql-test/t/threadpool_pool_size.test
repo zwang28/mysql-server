@@ -1,0 +1,31 @@
+# Start with thread_handling=pool-of-threads
+--source include/have_pool_of_threads.inc
+
+# Test that each thread group will have only one active thread if neither any stall or wait happens, no matter the number of cores available underneath.
+# Here thread_pool_stall_limit is set to a large value, to make those "very long command" treated as not stalled command. 
+
+connect(extracon,127.0.0.1,root,,,$MASTER_EXTRA_PORT);
+connect(conn1,127.0.0.1,root,,,$MASTER_MYPORT);
+connect(conn2,127.0.0.1,root,,,$MASTER_MYPORT);
+
+connection conn1;
+--let $conn1_id = `SELECT connection_id()`
+
+connection conn2;
+--let $conn2_id = `SELECT connection_id()`
+
+connection conn1;
+SEND SELECT benchmark(9999999999, md5('very long command 1'));
+
+connection conn2;
+SEND SELECT benchmark(9999999999, md5('very long command 2'));
+
+# Test that only one command is being executed
+connection extracon;
+SELECT COUNT(Id) FROM INFORMATION_SCHEMA.processlist where Info like 'SELECT benchmark(9999999999, md5(\'very long command%';
+
+# Clean up
+--disable_query_log
+eval KILL QUERY $conn1_id;
+eval KILL QUERY $conn2_id;
+--enable_query_log
