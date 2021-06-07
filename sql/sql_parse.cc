@@ -109,6 +109,8 @@
 #include "sql_query_rewrite.h"
 
 #include "rpl_group_replication.h"
+#include "threadpool.h"
+
 #include <algorithm>
 using std::max;
 
@@ -929,7 +931,8 @@ bool do_command(THD *thd)
       number of seconds has passed.
     */
     net= thd->get_protocol_classic()->get_net();
-    my_net_set_read_timeout(net, thd->variables.net_wait_timeout);
+    if (!thd->skip_wait_timeout)
+      my_net_set_read_timeout(net, thd->get_wait_timeout());
     net_new_transaction(net);
   }
 
@@ -1381,7 +1384,7 @@ bool dispatch_command(THD *thd, const COM_DATA *com_data,
     LEX_CSTRING save_db= thd->db();
     Security_context save_security_ctx(*(thd->security_context()));
 
-    auth_rc= acl_authenticate(thd, COM_CHANGE_USER);
+    auth_rc= acl_authenticate(thd, COM_CHANGE_USER, false);
 #ifndef EMBEDDED_LIBRARY
     auth_rc|= mysql_audit_notify(thd,
                              AUDIT_EVENT(MYSQL_AUDIT_CONNECTION_CHANGE_USER));
@@ -1691,19 +1694,25 @@ bool dispatch_command(THD *thd, const COM_DATA *com_data,
     error=TRUE;					// End server
     break;
 #ifndef EMBEDDED_LIBRARY
-  case COM_BINLOG_DUMP_GTID:
-    // TODO: access of protocol_classic should be removed
-    error=
-      com_binlog_dump_gtid(thd,
-        (char *)thd->get_protocol_classic()->get_raw_packet(),
-        thd->get_protocol_classic()->get_packet_length());
+  case COM_BINLOG_DUMP_GTID: {
+      tp_scheduler_event_begin(thd);
+      // TODO: access of protocol_classic should be removed
+      error =
+        com_binlog_dump_gtid(thd,
+          (char *)thd->get_protocol_classic()->get_raw_packet(),
+          thd->get_protocol_classic()->get_packet_length());
+      tp_scheduler_event_end(thd);
+    }
     break;
-  case COM_BINLOG_DUMP:
-    // TODO: access of protocol_classic should be removed
-    error=
-      com_binlog_dump(thd,
-        (char*)thd->get_protocol_classic()->get_raw_packet(),
-        thd->get_protocol_classic()->get_packet_length());
+  case COM_BINLOG_DUMP: {
+      tp_scheduler_event_begin(thd);
+      // TODO: access of protocol_classic should be removed
+      error=
+        com_binlog_dump(thd,
+          (char*)thd->get_protocol_classic()->get_raw_packet(),
+          thd->get_protocol_classic()->get_packet_length());
+      tp_scheduler_event_end(thd);
+    }
     break;
 #endif
   case COM_REFRESH:

@@ -99,7 +99,7 @@ my_bool vio_is_connected_pipe(Vio *vio)
 }
 
 
-int vio_shutdown_pipe(Vio *vio)
+int vio_shutdown_pipe(Vio *vio, int how)
 {
   BOOL ret= FALSE;
   DBUG_ENTER("vio_shutdown_pipe");
@@ -118,3 +118,17 @@ int vio_shutdown_pipe(Vio *vio)
 
   DBUG_RETURN(ret);
 }
+
+int vio_cancel_pipe(Vio *vio, int how)
+{
+  DBUG_ENTER("vio_shutdown_pipe");
+
+  CancelIo(vio->hPipe);
+  CloseHandle(vio->overlapped.hEvent);
+  DisconnectNamedPipe(vio->hPipe);
+
+  vio->inactive= TRUE;
+
+  DBUG_RETURN(0);
+}
+

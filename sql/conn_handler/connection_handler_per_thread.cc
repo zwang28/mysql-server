@@ -252,7 +252,8 @@ extern "C" void *handle_connection(void *arg)
     connection_errors_internal++;
     channel_info->send_error_and_close_channel(ER_OUT_OF_RESOURCES, 0, false);
     handler_manager->inc_aborted_connects();
-    Connection_handler_manager::dec_connection_count();
+    Connection_handler_manager
+      ::dec_connection_count(channel_info->is_on_extra_port());
     delete channel_info;
     my_thread_exit(0);
     return NULL;
@@ -260,12 +261,14 @@ extern "C" void *handle_connection(void *arg)
 
   for (;;)
   {
+    // Save this here as init_new_thd destroys channel_info
+    bool extra_port_connection= channel_info->is_on_extra_port();
     THD *thd= init_new_thd(channel_info);
     if (thd == NULL)
     {
       connection_errors_internal++;
       handler_manager->inc_aborted_connects();
-      Connection_handler_manager::dec_connection_count();
+      Connection_handler_manager::dec_connection_count(extra_port_connection);
       break; // We are out of resources, no sense in continuing.
     }
 
@@ -297,7 +300,7 @@ extern "C" void *handle_connection(void *arg)
 
     thd_manager->add_thd(thd);
 
-    if (thd_prepare_connection(thd))
+    if (thd_prepare_connection(thd, extra_port_connection))
       handler_manager->inc_aborted_connects();
     else
     {
@@ -319,7 +322,7 @@ extern "C" void *handle_connection(void *arg)
 #endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
 
     thd_manager->remove_thd(thd);
-    Connection_handler_manager::dec_connection_count();
+    Connection_handler_manager::dec_connection_count(extra_port_connection);
 
 #ifdef HAVE_PSI_THREAD_INTERFACE
     /*
@@ -344,7 +347,7 @@ extern "C" void *handle_connection(void *arg)
       channel_info->send_error_and_close_channel(ER_SERVER_SHUTDOWN, 0, false);
       delete channel_info;
       channel_info = NULL;
-      Connection_handler_manager::dec_connection_count();
+      Connection_handler_manager::dec_connection_count(extra_port_connection);
       break;
     }
   }
@@ -423,7 +426,8 @@ handle_error:
                       error);
     channel_info->send_error_and_close_channel(ER_CANT_CREATE_THREAD,
                                                error, true);
-    Connection_handler_manager::dec_connection_count();
+    Connection_handler_manager
+      ::dec_connection_count(channel_info->is_on_extra_port());
     DBUG_RETURN(true);
   }
 

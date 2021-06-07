@@ -101,6 +101,7 @@
 #include "replication.h" // thd_enter_cond
 
 #include "my_default.h"
+#include "threadpool.h"
 #include "mysql_version.h"
 
 #ifdef WITH_PERFSCHEMA_STORAGE_ENGINE
@@ -440,6 +441,7 @@ volatile sig_atomic_t calling_initgroups= 0; /**< Used in SIGSEGV handler. */
 const char *timestamp_type_names[]= {"UTC", "SYSTEM", NullS};
 ulong opt_log_timestamps;
 uint mysqld_port, test_flags, select_errors, dropping_tables, ha_open_options;
+uint mysqld_extra_port;
 uint mysqld_port_timeout;
 ulong delay_key_write_options;
 uint protocol_version;
@@ -488,6 +490,7 @@ ulong specialflag=0;
 ulong binlog_cache_use= 0, binlog_cache_disk_use= 0;
 ulong binlog_stmt_cache_use= 0, binlog_stmt_cache_disk_use= 0;
 ulong max_connections, max_connect_errors;
+ulong extra_max_connections;
 ulong rpl_stop_slave_timeout= LONG_TIMEOUT;
 my_bool log_bin_use_v1_row_events= 0;
 bool thread_cache_size_specified= false;
@@ -962,8 +965,8 @@ public:
     }
     mysql_mutex_lock(&killing_thd->LOCK_thd_data);
     killing_thd->killed= THD::KILL_CONNECTION;
-    MYSQL_CALLBACK(Connection_handler_manager::event_functions,
-                   post_kill_notification, (killing_thd));
+    MYSQL_CALLBACK(killing_thd->scheduler, post_kill_notification,
+                   (killing_thd));
     if (killing_thd->is_killable)
     {
       mysql_mutex_lock(&killing_thd->LOCK_current_cond);
@@ -1639,8 +1642,8 @@ static bool network_init(void)
 
     Mysqld_socket_listener *mysqld_socket_listener=
       new (std::nothrow) Mysqld_socket_listener(bind_addr_str,
-                                                mysqld_port, back_log,
-                                                mysqld_port_timeout,
+                                                mysqld_port, mysqld_extra_port,
+                                                back_log, mysqld_port_timeout,
                                                 unix_sock_name);
     if (mysqld_socket_listener == NULL)
       return true;
@@ -4512,6 +4515,8 @@ int mysqld_main(int argc, char **argv)
   sys_var_init();
   ulong requested_open_files;
   adjust_related_options(&requested_open_files);
+  // moved signal initialization here so that PFS thread inherited signal mask
+  my_init_signals();
 
 #ifdef WITH_PERFSCHEMA_STORAGE_ENGINE
   if (ho_error == 0)
@@ -4615,7 +4620,21 @@ int mysqld_main(int argc, char **argv)
   if (init_common_variables())
     unireg_abort(MYSQLD_ABORT_EXIT);        // Will do exit
 
-  my_init_signals();
+#ifndef EMBEDDED_LIBRARY
+  // Move connection handler initialization after the signal handling has been
+  // set up. Percona Server threadpool constructor is heavy, and creates a
+  // timer thread. If done before my_init_signals(), this thread will have
+  // the default signal mask, breaking SIGTERM etc. handing.
+  // This is not a problem with upstream loadable thread scheduler plugins, as
+  // its constructor is light and actual initialization is done later.
+  // This bit should be reverted once Percona Server threadpool becomes a
+  // plugin.
+  if (Connection_handler_manager::init())
+  {
+    sql_print_error("Could not allocate memory for connection handling");
+    unireg_abort(MYSQLD_ABORT_EXIT);
+  }
+#endif
 
   size_t guardize= 0;
 #ifndef _WIN32
@@ -5536,14 +5555,14 @@ void adjust_open_files_limit(ulong *requested_open_files)
   ulong effective_open_files;
 
   /* MyISAM requires two file handles per table. */
-  limit_1= 10 + max_connections + table_cache_size * 2;
+  limit_1= 10 + max_connections + extra_max_connections + table_cache_size * 2;
 
   /*
     We are trying to allocate no less than max_connections*5 file
     handles (i.e. we are trying to set the limit so that they will
     be available).
   */
-  limit_2= max_connections * 5;
+  limit_2= (max_connections + extra_max_connections) * 5;
 
   /* Try to allocate no less than 5000 by default. */
   limit_3= open_files_limit ? open_files_limit : 5000;
@@ -6797,6 +6816,17 @@ show_ssl_get_server_not_after(THD *thd, SHOW_VAR *var, char *buff)
 
 #endif /* HAVE_OPENSSL && !EMBEDDED_LIBRARY */
 
+#ifdef HAVE_POOL_OF_THREADS
+static int
+show_threadpool_idle_threads(THD *thd, SHOW_VAR *var, char *buff)
+{
+  var->type= SHOW_INT;
+  var->value= buff;
+  *(int *)buff= tp_get_idle_thread_count();
+  return 0;
+}
+#endif
+
 static int show_slave_open_temp_tables(THD *thd, SHOW_VAR *var, char *buf)
 {
   var->type= SHOW_INT;
@@ -6966,6 +6996,10 @@ SHOW_VAR status_vars[]= {
   {"Tc_log_max_pages_used",    (char*) &tc_log_max_pages_used,                         SHOW_LONG,              SHOW_SCOPE_GLOBAL},
   {"Tc_log_page_size",         (char*) &tc_log_page_size,                              SHOW_LONG_NOFLUSH,      SHOW_SCOPE_GLOBAL},
   {"Tc_log_page_waits",        (char*) &tc_log_page_waits,                             SHOW_LONG,              SHOW_SCOPE_GLOBAL},
+#ifdef HAVE_POOL_OF_THREADS
+  {"Threadpool_idle_threads",  (char *) &show_threadpool_idle_threads,                 SHOW_FUNC,              SHOW_SCOPE_GLOBAL},
+  {"Threadpool_threads",       (char *) &tp_stats.num_worker_threads,                  SHOW_INT,               SHOW_SCOPE_GLOBAL},
+#endif
 #ifndef EMBEDDED_LIBRARY
   {"Threads_cached",           (char*) &Per_thread_connection_handler::blocked_pthread_count, SHOW_LONG_NOFLUSH, SHOW_SCOPE_GLOBAL},
 #endif
@@ -7999,13 +8033,6 @@ static int get_options(int *argc_ptr, char ***argv_ptr)
                                   &global_datetime_format))
     return 1;
 
-#ifndef EMBEDDED_LIBRARY
-  if (Connection_handler_manager::init())
-  {
-    sql_print_error("Could not allocate memory for connection handling");
-    return 1;
-  }
-#endif
   if (Global_THD_manager::create_instance())
   {
     sql_print_error("Could not allocate memory for thread handling");
@@ -9366,6 +9393,8 @@ PSI_memory_key key_memory_fill_schema_schemata;
 PSI_memory_key key_memory_native_functions;
 PSI_memory_key key_memory_JSON;
 
+PSI_memory_key key_memory_thread_pool_connection;
+
 #ifdef HAVE_PSI_INTERFACE
 static PSI_memory_info all_server_memory[]=
 {
@@ -9419,6 +9448,8 @@ static PSI_memory_info all_server_memory[]=
   { &key_memory_log_event, "Log_event", 0},
   { &key_memory_Incident_log_event_message, "Incident_log_event::message", 0},
   { &key_memory_Rows_query_log_event_rows_query, "Rows_query_log_event::rows_query", 0},
+
+  { &key_memory_thread_pool_connection, "thread_pool_connection", 0},
 
   { &key_memory_Sort_param_tmp_buffer, "Sort_param::tmp_buffer", 0},
   { &key_memory_Filesort_info_merge, "Filesort_info::merge", 0},

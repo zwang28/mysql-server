@@ -35,7 +35,16 @@ typedef struct st_vio Vio;
 */
 class Channel_info
 {
+  enum CONN_TYPE {
+    CONN_TYPE_NONE = 0,
+    CONN_TYPE_EXTRA_PORT = 1,
+    CONN_TYPE_LOCAL = 2
+  };
+
   ulonglong prior_thr_create_utime;
+
+  uint m_conn_type;
+  bool m_on_extra_port;
 
 protected:
   /**
@@ -45,8 +54,12 @@ protected:
   */
   virtual Vio* create_and_init_vio() const = 0;
 
-  Channel_info()
-  : prior_thr_create_utime(0)
+  Channel_info(bool is_extra_port_conn = false,
+                bool is_local_conn = false)
+    : prior_thr_create_utime(0),
+    m_conn_type((is_extra_port_conn? CONN_TYPE_EXTRA_PORT : 0) | 
+                  (is_local_conn? CONN_TYPE_LOCAL : 0)),
+    m_on_extra_port(false)
   { }
 
 public:
@@ -80,6 +93,18 @@ public:
 
   void set_prior_thr_create_utime()
   { prior_thr_create_utime= my_micro_time(); }
+
+  void set_on_extra_port(bool on_extra_port)
+  { m_on_extra_port = on_extra_port; }
+
+  bool is_on_extra_port() const
+  { return m_on_extra_port; }
+
+  bool is_extra_port_connection() const
+  { return m_conn_type & CONN_TYPE_EXTRA_PORT; }
+
+  bool is_local_connection() const
+  { return m_conn_type & CONN_TYPE_LOCAL; }
 };
 
 #endif // SQL_CHANNEL_INFO_INCLUDED.
