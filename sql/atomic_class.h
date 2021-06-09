@@ -114,4 +114,33 @@ DEFINE_ATOMIC_CLASS(int32, 32, int32);
 DEFINE_ATOMIC_CLASS(int64, 64, int64);
 //DEFINE_ATOMIC_CLASS(pointer, ptr, void *);
 
+template <typename Type>
+class Atomic_counter_64
+{
+  Atomic_int64 m_counter;
+
+  Type add(Type i) { return m_counter.atomic_add(i); }
+  Type sub(Type i) { return m_counter.atomic_add(-i); }
+
+public:
+  Atomic_counter_64(Type val) : m_counter(val) {}
+  Atomic_counter_64() {}
+
+  Type operator++(int) { return add(1); }
+  Type operator--(int) { return sub(1); }
+
+  Type operator++() { return add(1) + 1; }
+  Type operator--() { return sub(1) - 1; }
+
+  Type operator+=(const Type i) { return add(i) + i; }
+  Type operator-=(const Type i) { return sub(i) - i; }
+
+  operator Type() { return m_counter.atomic_get(); }
+  Type operator=(const Type val)
+  {
+    m_counter.atomic_set(val);
+    return val;
+  }
+};
+
 #endif //ifndef ATOMIC_CLASS_H_INCLUDED
