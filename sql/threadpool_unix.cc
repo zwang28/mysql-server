@@ -1388,7 +1388,7 @@ void tp_post_kill_notification(THD *thd)
   DBUG_VOID_RETURN;
 }
 
-MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) Atomic_counter_64<unsigned long long> tp_waits[THD_WAIT_LAST];
+MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) Atomic_int64 tp_waits[THD_WAIT_LAST];
 
 /**
   MySQL scheduler callback: wait begin
@@ -1404,7 +1404,7 @@ void tp_wait_begin(THD *thd, int type)
     DBUG_ASSERT(!connection->waiting);
     connection->waiting= true;
     DBUG_ASSERT(type > 0 && type < THD_WAIT_LAST);
-    tp_waits[type]++;
+    tp_waits[type].atomic_add(1);
     wait_begin(connection->thread_group);
   }
   DBUG_VOID_RETURN;

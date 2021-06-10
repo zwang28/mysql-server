@@ -242,7 +242,7 @@ static const LEX_CSTRING wait_reasons[THD_WAIT_LAST] =
   {STRING_WITH_LEN("NET")}
 };
 
-extern Atomic_counter_64<unsigned long long> tp_waits[THD_WAIT_LAST];
+extern Atomic_int64 tp_waits[THD_WAIT_LAST];
 
 static int waits_fill_table(THD* thd, TABLE_LIST* tables, Item*)
 {
@@ -253,7 +253,7 @@ static int waits_fill_table(THD* thd, TABLE_LIST* tables, Item*)
   for (unsigned int i = 0; i < THD_WAIT_LAST; i++)
   {
     table->field[0]->store(wait_reasons[i].str, wait_reasons[i].length, system_charset_info);
-    table->field[1]->store(tp_waits[i], true);
+    table->field[1]->store(tp_waits[i].atomic_get(), true);
     if (schema_table_store_record(thd, table))
       return 1;
   }
