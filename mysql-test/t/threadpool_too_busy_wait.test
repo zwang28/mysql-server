@@ -2,7 +2,7 @@
 
 --source include/have_pool_of_threads.inc
 
-# initialzie data
+# initialize data
 CREATE DATABASE db1;
 CREATE TABLE db1.t1 (
     c1 int NOT NULL,

@@ -39,7 +39,7 @@ while ($counter<2)
 }
 
 # Execute this command in thread pool handler, so that the next command will be first of the two required io events.
-SET GLOBAL debug="+d,threadpool_io_poll_wait_at_lease_2_events";
+SET GLOBAL debug="+d,threadpool_io_poll_wait_at_least_2_events";
 --sleep 1
 
 # Test that listener polls 2 queue_events and process one of them, leaving the other in low priority queue
@@ -48,9 +48,9 @@ SET GLOBAL debug="+d,threadpool_io_poll_wait_at_lease_2_events";
 connection conn3;
 SEND SELECT 1;
 
-# Disable threadpool_io_poll_wait_at_lease_2_events
+# Disable threadpool_io_poll_wait_at_least_2_events
 connection extracon;
-SET GLOBAL debug="-d,threadpool_io_poll_wait_at_lease_2_events";
+SET GLOBAL debug="-d,threadpool_io_poll_wait_at_least_2_events";
 --sleep 1
 
 # Second of the two required io events, listener will deal with the 2 io_events, either process one of them or put both to queue.

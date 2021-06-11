@@ -8,8 +8,8 @@ SELECT 1;
 queue_length 0
 1
 1
-SET GLOBAL debug="+d,threadpool_io_poll_wait_at_lease_2_events";
+SET GLOBAL debug="+d,threadpool_io_poll_wait_at_least_2_events";
 SELECT 1;
-SET GLOBAL debug="-d,threadpool_io_poll_wait_at_lease_2_events";
+SET GLOBAL debug="-d,threadpool_io_poll_wait_at_least_2_events";
 SELECT 1;
 queue_length 1
