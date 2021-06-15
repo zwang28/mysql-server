@@ -1,0 +1,5 @@
+SELECT benchmark(9999999999, md5('very long command 1'));
+SELECT benchmark(9999999999, md5('very long command 2'));
+You should see a Lost connection message
+ERROR HY000: Lost connection to MySQL server at 'waiting for initial communication packet', system error: 110
+Found 1 stuck connections

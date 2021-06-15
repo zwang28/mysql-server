@@ -1,0 +1,8 @@
+SELECT benchmark(9999999999, md5('very long command 1'));
+SELECT benchmark(9999999999, md5('very long command 2'));
+SET GLOBAL debug='+d,threadpool_io_poll_wait_until_queue_not_empty';
+SELECT 1;
+SET GLOBAL debug='-d,threadpool_io_poll_wait_until_queue_not_empty';
+You should see a Lost connection message
+ERROR HY000: Lost connection to MySQL server at 'waiting for initial communication packet', system error: 110
+queue_length 2
