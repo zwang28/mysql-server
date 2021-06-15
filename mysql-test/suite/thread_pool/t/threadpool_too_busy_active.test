@@ -1,6 +1,6 @@
 # Start with thread_handling=pool-of-threads
 
---source include/have_pool_of_threads.inc
+--source suite/thread_pool/include/have_pool_of_threads.inc
 
 connect(conn1,127.0.0.1,root);
 connect(conn2,127.0.0.1,root);

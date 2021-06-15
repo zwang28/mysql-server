@@ -7,7 +7,7 @@
 # It is needed because of include/common-tests.inc here
 --source include/force_myisam_default.inc
 
--- source include/have_pool_of_threads.inc
+-- source suite/thread_pool/include/have_pool_of_threads.inc
 
 SELECT @@thread_pool_high_prio_tickets;
 

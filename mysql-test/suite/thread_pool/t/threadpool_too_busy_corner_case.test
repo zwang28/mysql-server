@@ -1,6 +1,6 @@
 # Start with thread_handling=pool-of-threads
 
---source include/have_pool_of_threads.inc
+--source suite/thread_pool/include/have_pool_of_threads.inc
 --source include/have_debug.inc
 
 # Test that in certain case the listener won't process the only io event it just polled, when too busy condition is already met.

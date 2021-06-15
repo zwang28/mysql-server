@@ -1,6 +1,6 @@
 # Start with thread_handling=pool-of-threads
 
---source include/have_pool_of_threads.inc
+--source suite/thread_pool/include/have_pool_of_threads.inc
 
 # Test that the new incoming connectins are dispatched to thread groups properly
 

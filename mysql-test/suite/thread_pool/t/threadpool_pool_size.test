@@ -1,5 +1,5 @@
 # Start with thread_handling=pool-of-threads
---source include/have_pool_of_threads.inc
+--source suite/thread_pool/include/have_pool_of_threads.inc
 
 # Test that each thread group will have only one active thread if neither any stall or wait happens, no matter what's the number of cores available underneath.
 # Here thread_pool_stall_limit is set to a large value, to make those "very long command" treated as not stalled command. 

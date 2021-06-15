@@ -1,38 +1,23 @@
---source include/have_pool_of_threads.inc
+--source suite/thread_pool/include/have_pool_of_threads.inc
 --source include/have_debug.inc
 
 # Test that existed connection may or may not be able to execute command, depending on the timing of io events's arrival
 
-# initialize data
-CREATE DATABASE db1;
-CREATE TABLE db1.t1 (
-    c1 int NOT NULL,
-    c2 int NOT NULL,
-    PRIMARY KEY (c1)
-);
-INSERT INTO db1.t1 (c1,c2) VALUES (1,11);
-INSERT INTO db1.t1 (c1,c2) VALUES (2,22);
-INSERT INTO db1.t1 (c1,c2) VALUES (3,33);
-
 connect(extracon,127.0.0.1,root,,,$MASTER_EXTRA_PORT);
-connect(conn0,127.0.0.1,root,,db1);
-connect(conn1,127.0.0.1,root,,db1);
-connect(conn2,127.0.0.1,root,,db1);
-connect(conn3,127.0.0.1,root,,db1);
-connect(conn4,127.0.0.1,root,,db1);
-
-connection conn0;
-START TRANSACTION;
-SELECT * FROM db1.t1 WHERE c1=2 FOR UPDATE;
---sleep 1
+connect(conn1,127.0.0.1,root);
+connect(conn2,127.0.0.1,root);
+connect(conn3,127.0.0.1,root);
+connect(conn4,127.0.0.1,root);
 
 connection conn1;
-START TRANSACTION;
-SEND SELECT * FROM db1.t1 WHERE c1=2 LOCK IN SHARE MODE;
+--let $conn1_id = `SELECT connection_id()`
+SEND SELECT benchmark(9999999999, md5('very long command 1'));
+
+--sleep 1
 
 connection conn2;
-START TRANSACTION;
-SEND SELECT * FROM db1.t1 WHERE c1=2 LOCK IN SHARE MODE;
+--let $conn2_id = `SELECT connection_id()`
+SEND SELECT benchmark(9999999999, md5('very long command 2'));
 
 # Test that listener polls 1 queue_event and process it. Verify it 2 times.
 --let $counter=0
@@ -79,29 +64,14 @@ connection extracon;
 --echo queue_length $queue_length
 
 # Clean up
-connection conn0;
-ROLLBACK;
+--disable_query_log
+eval KILL QUERY $conn1_id;
+eval KILL QUERY $conn2_id;
+--enable_query_log
 
-connection conn1;
-REAP;
-ROLLBACK;
+--sleep 1
 
-connection conn2;
-REAP;
-ROLLBACK;
-
-connection conn3;
-REAP;
-
-connection conn4;
-REAP;
-
-connection extracon;
---echo Clean up
-DROP TABLE db1.t1;
-DROP DATABASE db1;
-
-disconnect conn0;
+connection default;
 disconnect conn1;
 disconnect conn2;
 disconnect conn3;
